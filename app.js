@@ -1194,6 +1194,7 @@
   function viewLog() {
     const frag = h('div');
     frag.append(h('div', { class: 'view-head' }, h('h1', null, 'Log'),
+      state.unlocked ? h('a', { class: 'small', href: '#log', onclick: (e) => { e.preventDefault(); document.getElementById('players-card')?.scrollIntoView({ behavior: 'smooth' }); } }, 'Jump to players') : null,
       state.unlocked ? h('button', { class: 'btn btn-small btn-ghost', onclick: lock }, 'Lock editing') : null));
     if (!state.unlocked) {
       frag.append(unlockCard());
@@ -1226,7 +1227,7 @@
     }, input, btn);
     return h('section', { class: 'card' },
       h('h2', null, 'Enter the group code'),
-      h('p', { class: 'sub' }, 'Anyone can look; only people with the code can add or change games. This browser remembers it.'),
+      h('p', { class: 'sub' }, 'Anyone can look; you need the code to log sessions and to add or edit players. This browser remembers it.'),
       err, form);
   }
 
@@ -1388,7 +1389,7 @@
       },
     }, newName, h('label', { class: 'check' }, 'Subscriber since', newSince), h('button', { class: 'btn', type: 'submit' }, 'Add player'));
 
-    return h('section', { class: 'card' },
+    return h('section', { class: 'card', id: 'players-card' },
       h('h2', null, 'Players'),
       h('p', { class: 'sub' }, 'Fill in "Subscriber since" with the date someone\'s yearly subscription started; their break-even year runs from that date. Leave it empty for people without one.'),
       d.players.length ? list : null,
