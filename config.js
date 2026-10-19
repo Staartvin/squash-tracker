@@ -7,14 +7,14 @@ window.SQUASH_CONFIG = {
 
   // Supabase -> Project Settings -> API (or "Connect"). The publishable/anon key
   // is meant to be public; the group code in schema.sql protects writes.
-  supabaseUrl: '',
-  supabaseKey: '',
+  supabaseUrl: 'https://ttnnwvvadqdqteboicww.supabase.co',
+  supabaseKey: 'sb_publishable_8rrbT4hVkZCZC4y5UyKlhQ_MTUJIgQm',
 
   // First day of the subscription year. Each season runs one year from here.
-  seasonStart: '2026-09-01',
+  seasonStart: '2026-10-03',
 
   // What the yearly "Daluren" subscription costs per person.
-  subscriptionPrice: 312,
+  subscriptionPrice: 315,
 
   // What one visit would cost each person without a subscription.
   // Friday off-peak isn't open to non-subscribers, so this is a judgement

@@ -2,7 +2,7 @@
 
 A single static page that tracks:
 
-- **Subscription break-even:** for each subscriber, how much their visits this season would have cost without a subscription, measured against €312.
+- **Subscription break-even:** for each subscriber, how much their visits this season would have cost without a subscription, measured against €315.
 - **Leaderboard:** a rating for every player, plus wins, win % and points per game.
 - **Progress:** each player's points per game and rating over time, and their record against each opponent.
 - **History and input:** log a visit and its games from your phone at the club, protected by a shared group code.
