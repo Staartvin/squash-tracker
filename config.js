@@ -10,7 +10,8 @@ window.SQUASH_CONFIG = {
   supabaseUrl: 'https://ttnnwvvadqdqteboicww.supabase.co',
   supabaseKey: 'sb_publishable_8rrbT4hVkZCZC4y5UyKlhQ_MTUJIgQm',
 
-  // First day of the subscription year. Each season runs one year from here.
+  // Fallback start date for subscribers without their own "Subscriber since"
+  // date (set per player on the Log page), and the start of demo data.
   seasonStart: '2026-10-03',
 
   // What the yearly "Daluren" subscription costs per person.

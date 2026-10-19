@@ -411,6 +411,15 @@ textarea { min-height: 64px; resize: vertical; }
   .player-row .btn { grid-column: 3; grid-row: 1; }
 }
 .add-player { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: center; margin-top: 14px; }
-@media (max-width: 560px) { .add-player { grid-template-columns: 1fr auto; } .add-player .btn { grid-column: 1 / -1; } }
+.player-row label.check input.sub-date, .add-player label.check input.sub-date { width: 150px; min-height: 34px; padding: 4px 8px; }
+.add-player label.check { display: inline-flex; gap: 8px; align-items: center; font-size: 14px; color: var(--ink-2); white-space: nowrap; }
+
+.what-if { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--grid); }
+.what-if h3 { font-size: 14px; margin: 0 0 6px; font-weight: 600; }
+.what-if ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.what-if li { font-size: 14px; color: var(--ink-2); display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 6px; }
+.what-if li .dot { align-self: center; }
+.what-if li strong { color: var(--ink); font-weight: 600; }
+@media (max-width: 560px) { .add-player { grid-template-columns: 1fr; } }
 
 .unlock { display: flex; gap: 10px; max-width: 420px; }

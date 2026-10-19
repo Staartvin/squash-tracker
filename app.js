@@ -120,17 +120,31 @@
     return wd === 5 ? 'fri_peak' : 'offpeak';
   }
 
-  function seasonFor(iso) {
-    let k = 0;
-    while (addYears(CFG.seasonStart, k + 1) <= iso) k++;
-    while (addYears(CFG.seasonStart, k) > iso) k--;
-    return seasonByIndex(k);
+  // Each subscriber's year runs from their own start date. Players marked as
+  // subscriber without a date fall back to the configured default.
+  function subStart(p) {
+    return p.subscription_start || (p.is_subscriber ? CFG.seasonStart : null);
   }
-  function seasonByIndex(k) {
-    const start = addYears(CFG.seasonStart, k);
-    const end = addYears(CFG.seasonStart, k + 1);
-    return { k, start, end, label: `${start.slice(0, 4)}–${end.slice(2, 4)}` };
+
+  // How many full subscription years have started before today (0 = first year).
+  function subYearsDone(p) {
+    const start = subStart(p);
+    if (!start) return null;
+    const today = todayIso();
+    let n = 0;
+    while (addYears(start, n + 1) <= today) n++;
+    return n;
   }
+
+  // ago = 0 is the current subscription year, 1 the one before, and so on.
+  function subYear(p, ago) {
+    const n = subYearsDone(p);
+    if (n == null || n - ago < 0) return null;
+    const start = addYears(subStart(p), n - ago);
+    return { start, end: addYears(subStart(p), n - ago + 1) };
+  }
+
+  const lastDay = (end) => fromTime(toTime(end) - DAY);
 
   // ---------------------------------------------------------------------------
   // Backends
@@ -189,14 +203,14 @@
       deleteSession: (code, id) => rpc('delete_session', { p_code: code, p_id: id }),
       removeAttendance: (code, sessionId, playerId) => rpc('remove_attendance', { p_code: code, p_session_id: sessionId, p_player_id: playerId }),
       savePlayer: (code, p) => rpc('save_player', {
-        p_code: code, p_id: p.id || null, p_name: p.name, p_is_subscriber: !!p.is_subscriber, p_active: p.active !== false,
+        p_code: code, p_id: p.id || null, p_name: p.name, p_subscription_start: p.subscription_start || null, p_active: p.active !== false,
       }),
     };
   }
 
   // Demo mode: same interface, sample data kept in this browser only.
   function demoBackend() {
-    const KEY = 'squash-tracker-demo-v1';
+    const KEY = 'squash-tracker-demo-v2';
     const CODE = 'demo';
     let db = read() || seedDemo();
     write();
@@ -259,12 +273,12 @@
         if (!name || name.length > 40) throw new Error('Names need 1 to 40 characters.');
         if (db.players.some((r) => r.name.toLowerCase() === name.toLowerCase() && r.id !== p.id)) throw new Error('There is already a player with that name.');
         if (p.id) {
-          Object.assign(db.players.find((r) => r.id === p.id), { name, is_subscriber: !!p.is_subscriber, active: p.active !== false });
+          Object.assign(db.players.find((r) => r.id === p.id), { name, is_subscriber: !!p.subscription_start, subscription_start: p.subscription_start || null, active: p.active !== false });
           write();
           return p.id;
         }
         const id = uuid();
-        db.players.push({ id, name, is_subscriber: !!p.is_subscriber, active: true, created_at: new Date().toISOString() });
+        db.players.push({ id, name, is_subscriber: !!p.subscription_start, subscription_start: p.subscription_start || null, active: true, created_at: new Date().toISOString() });
         write();
         return id;
       },
@@ -284,14 +298,14 @@
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
     const people = [
-      { name: 'Vincent', sub: true, skill: (f) => 0.40 + 0.14 * f, show: 0.9 },
-      { name: 'Sam', sub: true, skill: () => 0.62, show: 0.85 },
-      { name: 'Joris', sub: true, skill: () => 0.57, show: 0.8 },
-      { name: 'Mila', sub: false, skill: () => 0.55, show: 0.45 },
-      { name: 'Thijs', sub: false, skill: () => 0.50, show: 0.35 },
+      { name: 'Vincent', since: CFG.seasonStart, skill: (f) => 0.40 + 0.14 * f, show: 0.9 },
+      { name: 'Sam', since: CFG.seasonStart, skill: () => 0.62, show: 0.85 },
+      { name: 'Joris', since: fromTime(toTime(todayIso()) - 2 * DAY), skill: () => 0.57, show: 0.8 },
+      { name: 'Mila', since: null, skill: () => 0.55, show: 0.45 },
+      { name: 'Thijs', since: null, skill: () => 0.50, show: 0.35 },
     ];
     const t0 = Date.now() - 400 * DAY;
-    const players = people.map((p, i) => ({ id: 'demo-p' + i, name: p.name, is_subscriber: p.sub, active: true, created_at: new Date(t0 + i * 1000).toISOString() }));
+    const players = people.map((p, i) => ({ id: 'demo-p' + i, name: p.name, is_subscriber: !!p.since, subscription_start: p.since, active: true, created_at: new Date(t0 + i * 1000).toISOString() }));
     const db = { players, sessions: [], attendance: [], games: [], seq: 0 };
 
     const end = toTime(todayIso()) - DAY;
@@ -303,7 +317,7 @@
       if (wd === 6 && rand() < 0.75) slot = 'offpeak';
       else if (wd === 5 && rand() < 0.3) slot = rand() < 0.8 ? 'fri_peak' : 'fri_offpeak';
       if (!slot) continue;
-      const here = people.map((p, i) => ({ p, i })).filter(({ p }) => rand() < p.show && (slot !== 'fri_offpeak' || p.sub));
+      const here = people.map((p, i) => ({ p, i })).filter(({ p }) => rand() < p.show && (slot !== 'fri_offpeak' || p.since));
       if (here.length < 2) continue;
       const id = 'demo-s' + db.sessions.length;
       db.sessions.push({ id, played_on: iso, slot, note: null, created_at: new Date(t).toISOString() });
@@ -409,14 +423,27 @@
     return { players, pById, sessions, games, gamesBySession, attBySession, stats, ranked, rankOf };
   }
 
-  function breakEven(d, season) {
+  function visitValue(d, playerId, from, to) {
+    let total = 0;
+    let visits = 0;
+    for (const sess of d.sessions) {
+      if (sess.played_on < from || sess.played_on >= to) continue;
+      if (!d.attBySession.get(sess.id)?.has(playerId)) continue;
+      total += CFG.slotValues[sess.slot] || 0;
+      visits++;
+    }
+    return { total, visits };
+  }
+
+  function breakEven(d, ago) {
     const price = CFG.subscriptionPrice;
     const today = todayIso();
-    const seasonDays = (toTime(season.end) - toTime(season.start)) / DAY;
-    const elapsedDays = Math.max(0, Math.min(seasonDays, (toTime(today) - toTime(season.start)) / DAY + 1));
     return d.players
-      .filter((p) => p.is_subscriber)
-      .map((p) => {
+      .map((p) => ({ p, season: subYear(p, ago) }))
+      .filter((x) => x.season)
+      .map(({ p, season }) => {
+        const seasonDays = (toTime(season.end) - toTime(season.start)) / DAY;
+        const elapsedDays = Math.max(0, Math.min(seasonDays, (toTime(today) - toTime(season.start)) / DAY + 1));
         let total = 0;
         let visits = 0;
         let crossed = null;
@@ -437,7 +464,7 @@
           const t = toTime(season.start) + (price / perDay) * DAY;
           if (t < toTime(season.end)) projectedDate = fromTime(t);
         }
-        return { player: p, total, visits, crossed, points, projected, projectedDate };
+        return { player: p, season, total, visits, crossed, points, projected, projectedDate };
       });
   }
 
@@ -581,8 +608,9 @@
           else d += `L${x},${y}`;
         });
         const last = pts[pts.length - 1];
-        if (opts.extendTo && curve === 'step') {
-          const xe = Math.min(X(opts.extendTo), M.l + iw);
+        const extendTo = ser.extendTo || opts.extendTo;
+        if (extendTo && curve === 'step') {
+          const xe = Math.min(X(extendTo), M.l + iw);
           if (xe > X(last.x)) d += `H${xe}`;
         }
         svg.append(s('path', { d, fill: 'none', stroke: ser.color, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
@@ -826,29 +854,22 @@
   function nameOf(id) { return state.d.pById.get(id)?.name || 'Unknown'; }
   function dotFor(id) { return h('span', { class: 'dot', style: `background:${state.d.pById.get(id)?.color || 'var(--muted)'}`, 'aria-hidden': 'true' }); }
 
-  function seasonsWithData() {
-    const cur = seasonFor(todayIso()).k;
-    const ks = new Set([cur]);
-    for (const x of state.d.sessions) ks.add(seasonFor(x.played_on).k);
-    return [...ks].sort((a, b) => b - a).map(seasonByIndex);
-  }
-
   // ----- Dashboard
 
   function viewDashboard() {
     const d = state.d;
-    const seasons = seasonsWithData();
-    if (state.seasonK == null || !seasons.some((x) => x.k === state.seasonK)) state.seasonK = seasonFor(todayIso()).k;
-    const season = seasonByIndex(state.seasonK);
+    const maxAgo = Math.max(0, ...d.players.map(subYearsDone).filter((n) => n != null));
+    if (state.seasonK == null || state.seasonK > maxAgo) state.seasonK = 0;
+    const yearLabel = (ago) => (ago === 0 ? 'Current year' : ago === 1 ? 'Previous year' : `${ago} years ago`);
 
     const frag = h('div');
     frag.append(h('div', { class: 'view-head' },
       h('h1', null, CFG.title),
-      seasons.length > 1 ? h('label', { class: 'muted small' }, 'Season ',
+      maxAgo > 0 ? h('label', { class: 'muted small' }, 'Subscription ',
         h('select', {
           style: 'width:auto;min-height:32px;padding:4px 8px',
           onchange: (e) => { state.seasonK = Number(e.target.value); render(); },
-        }, seasons.map((x) => h('option', { value: x.k, selected: x.k === state.seasonK }, x.label)))) : null));
+        }, Array.from({ length: maxAgo + 1 }, (_, ago) => h('option', { value: ago, selected: ago === state.seasonK }, yearLabel(ago))))) : null));
 
     if (!d.players.length) {
       frag.append(h('div', { class: 'card' },
@@ -858,47 +879,51 @@
       return frag;
     }
 
-    frag.append(breakEvenCard(season));
+    frag.append(breakEvenCard(state.seasonK));
     frag.append(leaderboardCard());
     if (d.ranked.length) frag.append(ratingChartCard());
     if (d.ranked.length >= 2) frag.append(headToHeadCard());
     return frag;
   }
 
-  function breakEvenCard(season) {
+  function breakEvenCard(ago) {
+    const d = state.d;
     const price = CFG.subscriptionPrice;
-    const rows = breakEven(state.d, season);
+    const rows = breakEven(d, ago);
     const today = todayIso();
-    const daysLeft = Math.max(0, Math.round((toTime(season.end) - toTime(today)) / DAY));
     const card = h('section', { class: 'card' },
       h('h2', null, 'Subscription break-even'),
       h('p', { class: 'sub' },
-        `Season ${fmtDate(season.start)} – ${fmtDate(fromTime(toTime(season.end) - DAY))}`,
-        today >= season.start && today < season.end ? ` · ${daysLeft} days left` : '',
-        ` · ${fmtEuro(price)} per person. Each visit counts what you'd otherwise pay: ${fmtEuro(CFG.slotValues.offpeak)} off-peak, ${fmtEuro(CFG.slotValues.fri_peak)} Friday peak.`));
+        `${fmtEuro(price)} per person per year, counted from each person's own start date. Each visit counts what you'd otherwise pay: ${fmtEuro(CFG.slotValues.offpeak)} off-peak, ${fmtEuro(CFG.slotValues.fri_peak)} Friday peak.`));
 
     if (!rows.length) {
-      card.append(h('p', { class: 'empty' }, 'No subscribers yet. Tick "Subscriber" for a player on the Log page.'));
-      return card;
+      card.append(h('p', { class: 'empty' }, 'No subscribers yet. Fill in "Subscriber since" for a player on the Log page.'));
     }
 
     card.append(h('div', { class: 'meters' }, rows.map((r) => {
       const pct = Math.min(1, r.total / price);
       const done = r.total >= price;
       const toGo = Math.max(0, price - r.total);
+      const running = today >= r.season.start && today < r.season.end;
+      const daysLeft = Math.round((toTime(r.season.end) - toTime(today)) / DAY);
       const notes = [];
       notes.push(h('span', null, `${r.visits} visit${r.visits === 1 ? '' : 's'}`));
       if (done) {
         notes.push(h('span', { class: 'badge-good' }, '✓ Broke even on ' + fmtDate(r.crossed, { year: undefined })));
         notes.push(h('span', null, `${fmtEuro(r.total - price)} ahead`));
+      } else if (!running && today >= r.season.end) {
+        notes.push(h('span', null, `Ended ${fmtEuro(toGo)} short`));
       } else {
         notes.push(h('span', null, `${Math.ceil(toGo / CFG.slotValues.offpeak)} more off-peak visits to go (or ${Math.ceil(toGo / CFG.slotValues.fri_peak)} Friday peak)`));
         if (r.projectedDate) notes.push(h('span', null, 'At this pace: break-even around ' + fmtDate(r.projectedDate)));
-        else if (r.projected != null) notes.push(h('span', null, `At this pace: ${fmtEuro(Math.round(r.projected))} by season end, ${fmtEuro(Math.round(price - r.projected))} short`));
+        else if (r.projected != null) notes.push(h('span', null, `At this pace: ${fmtEuro(Math.round(r.projected))} by the end of the year, ${fmtEuro(Math.round(price - r.projected))} short`));
       }
       return h('div', { class: 'meter' + (done ? ' done' : '') },
         h('div', { class: 'meter-top' },
-          h('span', { class: 'meter-name' }, dotFor(r.player.id), r.player.name),
+          h('span', { class: 'meter-name' }, dotFor(r.player.id), r.player.name,
+            h('span', { class: 'muted small', style: 'font-weight:400' },
+              `${fmtDate(r.season.start)} – ${fmtDate(lastDay(r.season.end))}`,
+              running ? ` · ${daysLeft} days left` : today < r.season.start ? ' · not started yet' : '')),
           h('span', { class: 'meter-amount' }, h('strong', null, fmtEuro(r.total)), h('span', { class: 'muted' }, ` of ${fmtEuro(price)}`))),
         h('div', {
           class: 'meter-track', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': price, 'aria-valuenow': Math.round(r.total),
@@ -908,17 +933,40 @@
     })));
 
     if (rows.some((r) => r.visits > 0)) {
+      const from = rows.map((r) => r.season.start).sort()[0];
+      const to = rows.map((r) => lastDay(r.season.end)).sort().pop();
       card.append(lineChart({
-        label: 'Value of visits so far this season per subscriber, against the subscription price',
-        series: rows.map((r) => ({ id: r.player.id, name: r.player.name, color: r.player.color, points: r.points })),
-        xDomain: [season.start, fromTime(toTime(season.end) - DAY)],
-        extendTo: today < season.end ? today : fromTime(toTime(season.end) - DAY),
+        label: 'Value of visits so far this subscription year per subscriber, against the subscription price',
+        series: rows.map((r) => ({
+          id: r.player.id, name: r.player.name, color: r.player.color, points: r.points,
+          extendTo: today < lastDay(r.season.end) ? today : lastDay(r.season.end),
+        })),
+        xDomain: [from, to],
         target: { y: price, label: `${fmtEuro(price)} subscription` },
         yMin: 0,
         yFmt: (v) => fmtEuro(Math.round(v)),
         curve: 'step',
         height: 220,
       }));
+    }
+
+    // What a subscription would be worth to the people who don't have one.
+    if (ago === 0) {
+      const yearAgo = addYears(today, -1);
+      const tomorrow = fromTime(toTime(today) + DAY);
+      const others = d.players.filter((p) => !subStart(p) && p.active !== false);
+      if (others.length) {
+        card.append(h('div', { class: 'what-if' },
+          h('h3', null, 'Without a subscription'),
+          h('ul', null, others.map((p) => {
+            const v = visitValue(d, p.id, yearAgo, tomorrow);
+            return h('li', null, dotFor(p.id), h('strong', null, p.name), ' ',
+              v.visits
+                ? `${v.visits} visit${v.visits === 1 ? '' : 's'} in the last 12 months, about ${fmtEuro(v.total)} paid. ` +
+                  (v.total >= price ? 'A subscription would have paid off.' : `A subscription pays off after ${fmtEuro(price - v.total)} more.`)
+                : 'no visits logged in the last 12 months.');
+          }))));
+      }
     }
     return card;
   }
@@ -1016,8 +1064,11 @@
       return frag;
     }
 
-    const season = seasonFor(todayIso());
-    const seasonVisits = d.sessions.filter((x) => x.played_on >= season.start && x.played_on < season.end && d.attBySession.get(x.id)?.has(pid)).length;
+    const today = todayIso();
+    const subYr = subYear(p, 0);
+    const visitWindow = subYr
+      ? { ...visitValue(d, pid, subYr.start, subYr.end), label: `since ${fmtDate(subYr.start)}` }
+      : { ...visitValue(d, pid, addYears(today, -1), fromTime(toTime(today) + DAY)), label: 'last 12 months' };
     const first = st.perSession.slice(0, 3);
     const last = st.perSession.slice(-3);
     const avg = (xs) => xs.reduce((a, x) => a + x.pf, 0) / xs.reduce((a, x) => a + x.games, 0);
@@ -1029,7 +1080,7 @@
       tile('Win rate', fmtPct(st.wins / st.games), ''),
       tile('Points per game', fmt1(st.pf / st.games),
         trend == null ? `conceded ${fmt1(st.pa / st.games)}` : h('span', { class: trend > 0.05 ? 'delta-up' : trend < -0.05 ? 'delta-down' : '' }, `${trend >= 0 ? '+' : '−'}${Math.abs(trend).toFixed(1)} vs first 3 sessions`)),
-      tile('Visits this season', seasonVisits, season.label)));
+      tile('Visits', visitWindow.visits, `${visitWindow.label} · worth ${fmtEuro(visitWindow.total)}`)));
 
     frag.append(h('div', { class: 'grid-2' },
       h('section', { class: 'card' },
@@ -1210,7 +1261,7 @@
           dr.playerIds = e.target.checked ? [...new Set([...dr.playerIds, p.id])] : dr.playerIds.filter((x) => x !== p.id);
         }),
       }),
-      h('span', null, dotFor(p.id), p.name, p.is_subscriber ? h('small', null, 'sub') : null))));
+      h('span', null, dotFor(p.id), p.name, subStart(p) ? h('small', null, 'sub') : null))));
 
     const here = new Set([...dr.playerIds, ...inGames]);
     const options = active.slice().sort((a, b) => (here.has(b.id) ? 1 : 0) - (here.has(a.id) ? 1 : 0));
@@ -1241,7 +1292,7 @@
 
     const note = h('input', { type: 'text', maxlength: 200, value: dr.note || '', placeholder: 'Optional', oninput: (e) => { dr.note = e.target.value; saveDraft(); } });
 
-    const saveBtn = h('button', { type: 'submit', class: 'btn btn-primary' }, existing ? 'Add to this session' : 'Save session');
+    const saveBtn = h('button', { type: 'submit', class: 'btn btn-primary' }, existing ? 'Add to this session' : dr.games.length ? 'Save session' : 'Save visit');
 
     const form = h('form', {
       onsubmit: async (e) => {
@@ -1276,7 +1327,7 @@
     existing ? h('p', { class: 'notice' }, `There is already a session on this date and slot (${(d.gamesBySession.get(existing.id) || []).length} games). Saving adds to it, so the visit isn't counted twice.`) : null,
     h('div', { class: 'field' }, h('span', { class: 'label' }, 'Who was there? ', h('span', { class: 'hint' }, 'Counts towards break-even for subscribers.')), peopleChoices),
     h('div', { class: 'field' },
-      h('span', { class: 'label' }, 'Games ', h('span', { class: 'hint' }, 'One row per game, e.g. 11–7.')),
+      h('span', { class: 'label' }, 'Games ', h('span', { class: 'hint' }, 'Optional. One row per game, e.g. 11–7. Don\'t remember the scores? Just save the visit.')),
       rows,
       h('div', null, h('button', { type: 'button', class: 'btn', onclick: addGame }, dr.games.length ? '+ Another game' : '+ Add a game'))),
     h('div', { class: 'field' }, h('label', null, 'Note'), note),
@@ -1305,39 +1356,41 @@
 
   function playersCard() {
     const d = state.d;
+    const subDate = (value, labelText) => h('input', { type: 'date', value: value || '', 'aria-label': labelText, class: 'sub-date' });
     const list = h('div', { class: 'player-rows' }, d.players.map((p) => {
       const name = h('input', { type: 'text', value: p.name, maxlength: 40, 'aria-label': 'Name' });
-      const sub = h('input', { type: 'checkbox', checked: !!p.is_subscriber });
+      const since = subDate(subStart(p), `${p.name}: subscriber since`);
       const activeBox = h('input', { type: 'checkbox', checked: p.active !== false });
       const btn = h('button', {
         type: 'button', class: 'btn btn-small', disabled: true,
-        onclick: () => act(() => api.savePlayer(state.code, { id: p.id, name: name.value, is_subscriber: sub.checked, active: activeBox.checked }), 'Player saved'),
+        onclick: () => act(() => api.savePlayer(state.code, { id: p.id, name: name.value, subscription_start: since.value || null, active: activeBox.checked }), 'Player saved'),
       }, 'Save');
-      const dirty = () => { btn.disabled = name.value.trim() === p.name && sub.checked === !!p.is_subscriber && activeBox.checked === (p.active !== false); };
+      const dirty = () => { btn.disabled = name.value.trim() === p.name && since.value === (subStart(p) || '') && activeBox.checked === (p.active !== false); };
       name.addEventListener('input', dirty);
-      sub.addEventListener('change', dirty);
+      since.addEventListener('input', dirty);
+      since.addEventListener('change', dirty);
       activeBox.addEventListener('change', dirty);
       return h('div', { class: 'player-row' },
         dotFor(p.id), name,
-        h('label', { class: 'check' }, sub, 'Subscriber'),
+        h('label', { class: 'check' }, 'Subscriber since', since),
         h('label', { class: 'check', title: 'Inactive players are hidden from the log form' }, activeBox, 'Active'),
         btn);
     }));
 
     const newName = h('input', { type: 'text', maxlength: 40, placeholder: 'New player name', 'aria-label': 'New player name' });
-    const newSub = h('input', { type: 'checkbox' });
+    const newSince = subDate('', 'New player: subscriber since');
     const addForm = h('form', {
       class: 'add-player',
       onsubmit: (e) => {
         e.preventDefault();
         if (!newName.value.trim()) return;
-        act(() => api.savePlayer(state.code, { name: newName.value, is_subscriber: newSub.checked }), 'Player added');
+        act(() => api.savePlayer(state.code, { name: newName.value, subscription_start: newSince.value || null }), 'Player added');
       },
-    }, newName, h('label', { class: 'check', style: 'display:inline-flex;gap:6px;align-items:center;font-size:14px;color:var(--ink-2)' }, newSub, 'Subscriber'), h('button', { class: 'btn', type: 'submit' }, 'Add player'));
+    }, newName, h('label', { class: 'check' }, 'Subscriber since', newSince), h('button', { class: 'btn', type: 'submit' }, 'Add player'));
 
     return h('section', { class: 'card' },
       h('h2', null, 'Players'),
-      h('p', { class: 'sub' }, 'Tick "Subscriber" for everyone with a yearly subscription, so they get a break-even meter.'),
+      h('p', { class: 'sub' }, 'Fill in "Subscriber since" with the date someone\'s yearly subscription started; their break-even year runs from that date. Leave it empty for people without one.'),
       d.players.length ? list : null,
       addForm);
   }

@@ -45,9 +45,7 @@ Then open http://localhost:8765. The demo group code is `demo`.
 
    This key is meant to be public. The database only allows reading, and every change goes through functions that check the group code first.
 
-7. Set `seasonStart` in `config.js` to the date your subscription year started.
-
-Then open the page, go to **+ Log**, enter the group code, and add the players. Tick **Subscriber** for the three of you who have the subscription.
+Then open the page, go to **+ Log**, enter the group code, and add the players. For everyone with a subscription, fill in **Subscriber since** with the date it started. Each subscriber's year runs from their own date, so people who join later get their own break-even year. Leave the date empty for people without a subscription.
 
 ## 3. Hosting (GitHub Pages)
 
@@ -57,6 +55,12 @@ https://staartvin.github.io/squash-tracker/
 Every push to `main` updates the site within a minute or two. Settings live under the repository's **Settings → Pages**. The empty `.nojekyll` file tells Pages to serve the files as they are.
 
 The page uses relative paths, so you can also copy `index.html`, `styles.css`, `app.js` and `config.js` into any other static host or subfolder.
+
+## Database updates
+
+If you set up the database before a change that needs one, run the matching file in the Supabase SQL Editor once (fresh installs via `schema.sql` already include it):
+
+- `supabase/002_subscription_start.sql`: gives each player their own subscription start date.
 
 ## Day to day
 
@@ -70,11 +74,15 @@ The page uses relative paths, so you can also copy `index.html`, `styles.css`, `
   ```
 
 - **Prices change?** Edit `slotValues` and `subscriptionPrice` in `config.js`. Break-even is recalculated from the logged visits, so past visits use the new prices too.
-- **New season:** nothing to do. Seasons run one year from `seasonStart`, and the dashboard has a season picker once there's more than one.
+- **Old visits without scores:** log them anyway. Pick the date and slot, tick who was there and press **Save visit**. Games are optional, and a visit still counts towards break-even.
+- **Someone gets a subscription:** fill in their **Subscriber since** date on the Log page and press Save.
+- **New subscription year:** nothing to do. Each subscriber's year rolls over on the anniversary of their start date, and the dashboard gets a picker for previous years.
 
 ## How the numbers work
 
-**Break-even.** Each visit a subscriber logs counts what that visit would have cost them without a subscription: €10 off-peak and €14 on Friday peak. Friday off-peak isn't open to non-subscribers, so it's counted as €10; change `fri_offpeak` in `config.js` if you'd rather count it differently. "At this pace" projects your visits so far across the rest of the season.
+**Break-even.** Each visit a subscriber logs counts what that visit would have cost them without a subscription: €10 off-peak and €14 on Friday peak. Friday off-peak isn't open to non-subscribers, so it's counted as €10; change `fri_offpeak` in `config.js` if you'd rather count it differently. Each subscriber is measured over their own year, starting from their **Subscriber since** date; visits before that date don't count. "At this pace" projects your visits so far across the rest of your year.
+
+For people without a subscription, the dashboard shows what their visits over the last 12 months cost, and how much more it would take for a subscription to pay off.
 
 **Rating.** Everyone starts at 1000. After each game, rating points move from one player to the other depending on how the result compares with what the ratings predicted (Elo, K = 32). A game's result is half the win and half your share of the points. So losing 9–11 to a much stronger player can still raise your rating, and getting better shows up before you start winning.
 

@@ -60,6 +60,8 @@ create table if not exists public.players (
   id            uuid        primary key default gen_random_uuid(),
   name          text        not null unique check (char_length(btrim(name)) between 1 and 40),
   is_subscriber boolean     not null default false,
+  -- Start of this player's yearly subscription; null = no subscription.
+  subscription_start date,
   active        boolean     not null default true,
   created_at    timestamptz not null default now()
 );
@@ -225,13 +227,13 @@ begin
 end;
 $$;
 
--- Adds a player (p_id null) or updates one.
+-- Adds a player (p_id null) or updates one. A null start date means no subscription.
 create or replace function public.save_player(
-  p_code          text,
-  p_id            uuid,
-  p_name          text,
-  p_is_subscriber boolean,
-  p_active        boolean default true
+  p_code               text,
+  p_id                 uuid,
+  p_name               text,
+  p_subscription_start date,
+  p_active             boolean default true
 )
 returns uuid
 language plpgsql
@@ -243,12 +245,15 @@ declare
 begin
   perform private.check_code(p_code);
   if p_id is null then
-    insert into public.players (name, is_subscriber, active)
-    values (btrim(p_name), p_is_subscriber, p_active)
+    insert into public.players (name, is_subscriber, subscription_start, active)
+    values (btrim(p_name), p_subscription_start is not null, p_subscription_start, p_active)
     returning id into v_id;
   else
     update public.players
-    set name = btrim(p_name), is_subscriber = p_is_subscriber, active = p_active
+    set name = btrim(p_name),
+        is_subscriber = p_subscription_start is not null,
+        subscription_start = p_subscription_start,
+        active = p_active
     where id = p_id
     returning id into v_id;
   end if;
@@ -264,7 +269,7 @@ revoke execute on function
   public.delete_game(text, bigint),
   public.delete_session(text, uuid),
   public.remove_attendance(text, uuid, uuid),
-  public.save_player(text, uuid, text, boolean, boolean)
+  public.save_player(text, uuid, text, date, boolean)
 from public;
 
 grant execute on function
@@ -273,5 +278,5 @@ grant execute on function
   public.delete_game(text, bigint),
   public.delete_session(text, uuid),
   public.remove_attendance(text, uuid, uuid),
-  public.save_player(text, uuid, text, boolean, boolean)
+  public.save_player(text, uuid, text, date, boolean)
 to anon, authenticated;
