@@ -146,6 +146,36 @@
 
   const lastDay = (end) => fromTime(toTime(end) - DAY);
 
+  const MONDAY_EPOCH = Date.parse('1970-01-05T00:00:00Z');
+  const weekOf = (iso) => Math.floor((toTime(iso) - MONDAY_EPOCH) / (7 * DAY));
+
+  // A streak stays alive through the current week until Sunday, so not having
+  // played yet this week doesn't break it, it puts it "on the line".
+  function weekStreak(weeks, thisWeek) {
+    let best = 0;
+    let run = 0;
+    let prev = null;
+    for (const w of [...weeks].sort((a, b) => a - b)) {
+      run = prev != null && w === prev + 1 ? run + 1 : 1;
+      best = Math.max(best, run);
+      prev = w;
+    }
+    const from = weeks.has(thisWeek) ? thisWeek : weeks.has(thisWeek - 1) ? thisWeek - 1 : null;
+    let current = 0;
+    if (from != null) for (let w = from; weeks.has(w); w--) current++;
+    return { current, best, onTheLine: current > 0 && !weeks.has(thisWeek) };
+  }
+
+  function winStreak(recent) {
+    let best = 0;
+    let run = 0;
+    for (const g of recent) {
+      run = g.pf > g.pa ? run + 1 : 0;
+      best = Math.max(best, run);
+    }
+    return { current: run, best };
+  }
+
   // ---------------------------------------------------------------------------
   // Backends
   // ---------------------------------------------------------------------------
@@ -366,6 +396,8 @@
       history: [], perSession: [], opp: new Map(), recent: [],
     }]));
 
+    let upset = null;
+    let marathon = null;
     for (const sess of sessions) {
       const before = new Map();
       const tally = new Map();
@@ -379,6 +411,16 @@
         const share = g.score_a / (g.score_a + g.score_b);
         const actual = 0.5 * (g.score_a > g.score_b ? 1 : 0) + 0.5 * share;
         const delta = ELO_K * (actual - expected);
+        const aWon = g.score_a > g.score_b;
+        const winnerChance = aWon ? expected : 1 - expected;
+        if (winnerChance < 0.4 && (!upset || winnerChance < upset.chance)) {
+          upset = {
+            chance: winnerChance, date: sess.played_on,
+            winner: aWon ? g.player_a : g.player_b, loser: aWon ? g.player_b : g.player_a,
+            ws: Math.max(g.score_a, g.score_b), ls: Math.min(g.score_a, g.score_b),
+          };
+        }
+        if (!marathon || g.score_a + g.score_b > marathon.g.score_a + marathon.g.score_b) marathon = { g, date: sess.played_on };
         A.rating += delta;
         B.rating -= delta;
         record(A, g.player_a, g.player_b, g.score_a, g.score_b);
@@ -420,7 +462,19 @@
       .sort((a, b) => stats.get(b.id).rating - stats.get(a.id).rating);
     const rankOf = new Map(ranked.map((p, i) => [p.id, i + 1]));
 
-    return { players, pById, sessions, games, gamesBySession, attBySession, stats, ranked, rankOf };
+    // Week streaks: weeks (Monday to Sunday) in a row with at least one visit.
+    const thisWeek = weekOf(todayIso());
+    const weeksBy = new Map(players.map((p) => [p.id, new Set()]));
+    for (const sess of sessions) {
+      for (const pid of attBySession.get(sess.id) || []) weeksBy.get(pid)?.add(weekOf(sess.played_on));
+    }
+    for (const p of players) {
+      const st = stats.get(p.id);
+      st.weekStreak = weekStreak(weeksBy.get(p.id), thisWeek);
+      st.winStreak = winStreak(st.recent);
+    }
+
+    return { players, pById, sessions, games, gamesBySession, attBySession, stats, ranked, rankOf, upset, marathon };
   }
 
   function visitValue(d, playerId, from, to) {
@@ -879,8 +933,9 @@
       return frag;
     }
 
-    frag.append(breakEvenCard(state.seasonK));
     frag.append(leaderboardCard());
+    frag.append(breakEvenCard(state.seasonK));
+    frag.append(funStatsCard());
     if (d.ranked.length) frag.append(ratingChartCard());
     if (d.ranked.length >= 2) frag.append(headToHeadCard());
     return frag;
@@ -976,14 +1031,22 @@
     const card = h('section', { class: 'card' },
       h('h2', null, 'Leaderboard'),
       h('p', { class: 'sub' }, 'All games, all time. Ranked by rating; tap a player for their progress.'));
+    const onTheLine = d.players
+      .filter((p) => p.active !== false && d.stats.get(p.id).weekStreak.onTheLine && d.stats.get(p.id).weekStreak.current >= 2)
+      .sort((a, b) => d.stats.get(b.id).weekStreak.current - d.stats.get(a.id).weekStreak.current);
+    const streakNote = onTheLine.length ? h('p', { class: 'streak-note' },
+      h('span', { 'aria-hidden': 'true' }, '🔥 '),
+      h('strong', null, 'Streaks on the line this week: '),
+      onTheLine.map((p) => `${p.name} (${d.stats.get(p.id).weekStreak.current} weeks)`).join(', '),
+      '. Play before Sunday to keep them going.') : null;
     if (!d.ranked.length) {
-      card.append(h('p', { class: 'empty' }, 'No games yet. Log a session to get the leaderboard going.'));
+      card.append(h('p', { class: 'empty' }, 'No games yet. Log a session to get the leaderboard going.'), streakNote);
       return card;
     }
     card.append(h('div', { class: 'table-wrap' }, h('table', { class: 'data' },
       h('thead', null, h('tr', null,
         h('th', null, '#'), h('th', null, 'Player'), h('th', { class: 'num' }, 'Rating'), h('th', { class: 'num' }, 'Last'),
-        h('th', { class: 'num' }, 'Games'), h('th', { class: 'num' }, 'W–L'), h('th', { class: 'num' }, 'Win %'), h('th', { class: 'num', title: 'Average points scored per game' }, 'Pts/game'))),
+        h('th', { class: 'num' }, 'Games'), h('th', { class: 'num' }, 'W–L'), h('th', { class: 'num' }, 'Win %'), h('th', { class: 'num', title: 'Average points scored per game' }, 'Pts/game'), h('th', { class: 'num', title: 'Weeks in a row with a visit' }, 'Streak'))),
       h('tbody', null, d.ranked.map((p, i) => {
         const st = d.stats.get(p.id);
         const delta = st.lastDelta;
@@ -995,13 +1058,142 @@
           h('td', { class: 'num' }, st.games),
           h('td', { class: 'num' }, `${st.wins}–${st.games - st.wins}`),
           h('td', { class: 'num' }, fmtPct(st.wins / st.games)),
-          h('td', { class: 'num' }, fmt1(st.pf / st.games)));
+          h('td', { class: 'num' }, fmt1(st.pf / st.games)),
+          h('td', { class: 'num', title: `${st.weekStreak.current} week${st.weekStreak.current === 1 ? '' : 's'} in a row, best ${st.weekStreak.best}` },
+            st.weekStreak.current >= 2 ? `🔥 ${st.weekStreak.current}` : st.weekStreak.current || '–'));
       })))));
+    if (streakNote) card.append(streakNote);
     card.append(h('details', { class: 'explain' },
       h('summary', null, 'How the rating works'),
       h('p', null, `Everyone starts at ${ELO_START}. After each game, points move from one player to the other based on how the result compares with what the ratings predicted. Beating a higher-rated player earns more than beating a lower-rated one.`),
       h('p', null, 'The result of a game is half the win and half the share of points you scored. So losing 9–11 to someone much stronger can still raise your rating, and improving shows up before the wins do.'),
-      h('p', null, `"Last" is the change in your most recent session. Players marked "new" have fewer than ${PROVISIONAL_GAMES} games, so their rating is still settling.`)));
+      h('p', null, `"Last" is the change in your most recent session. Players marked "new" have fewer than ${PROVISIONAL_GAMES} games, so their rating is still settling.`),
+      h('p', null, '"Streak" counts weeks in a row (Monday to Sunday) with at least one visit. This week only breaks it once Sunday has passed without a visit.')));
+    return card;
+  }
+
+  function funStatsCard() {
+    const d = state.d;
+    const today = todayIso();
+    const awards = [];
+    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    const best = (list, score) => list.reduce((top, x) => (score(x) > (top ? score(top) : -Infinity) ? x : top), null);
+    const active = d.players.filter((p) => p.active !== false);
+
+    // Ties share the award: one name gets a colour dot, several are listed.
+    const holders = (list, score) => {
+      const top = best(list, score);
+      return top ? list.filter((x) => score(x) === score(top)) : [];
+    };
+    const named = (ids) => (ids.length === 1 ? { who: ids[0] } : { title: ids.map(nameOf).join(' & ') });
+
+    const streakers = holders(active, (p) => d.stats.get(p.id).weekStreak.current);
+    if (streakers.length && d.stats.get(streakers[0].id).weekStreak.current >= 2) {
+      const ws = d.stats.get(streakers[0].id).weekStreak;
+      awards.push({
+        icon: '🔥', label: 'Longest week streak', ...named(streakers.map((p) => p.id)), value: `${ws.current} weeks in a row`,
+        detail: streakers.length === 1 ? (ws.onTheLine ? 'On the line this week' : 'Already played this week') : null,
+      });
+    }
+
+    const monthStart = today.slice(0, 8) + '01';
+    const monthVisits = new Map();
+    for (const sess of d.sessions) {
+      if (sess.played_on < monthStart || sess.played_on > today) continue;
+      for (const pid of d.attBySession.get(sess.id) || []) monthVisits.set(pid, (monthVisits.get(pid) || 0) + 1);
+    }
+    const regulars = holders([...monthVisits.keys()], (pid) => monthVisits.get(pid));
+    if (regulars.length) {
+      awards.push({
+        icon: '📅', label: 'Regular of the month', ...named(regulars),
+        value: `${plural(monthVisits.get(regulars[0]), 'visit')} in ${fmtDate(today, { day: undefined, year: undefined, month: 'long' })}`,
+      });
+    }
+
+    const hot = holders(d.ranked, (p) => d.stats.get(p.id).winStreak.current);
+    if (hot.length && d.stats.get(hot[0].id).winStreak.current >= 2) {
+      const w = d.stats.get(hot[0].id).winStreak;
+      awards.push({ icon: '⚡', label: 'Hot hand', ...named(hot.map((p) => p.id)), value: `${w.current} wins in a row`, detail: hot.length === 1 ? `Best ever: ${w.best}` : null });
+    }
+
+    const monthAgo = fromTime(toTime(today) - 30 * DAY);
+    const climb = (p) => {
+      const hist = d.stats.get(p.id).history;
+      if (!hist.length || hist[hist.length - 1].x < monthAgo) return -Infinity;
+      const before = valueAt(hist, fromTime(toTime(monthAgo) - DAY));
+      return d.stats.get(p.id).rating - (before ? before.y : ELO_START);
+    };
+    const climber = best(d.ranked, climb);
+    if (climber && climb(climber) >= 1) {
+      awards.push({ icon: '📈', label: 'Climber of the month', who: climber.id, value: `${fmtSigned(climb(climber))} rating`, detail: 'Over the last 30 days' });
+    }
+
+    if (d.upset) {
+      awards.push({
+        icon: '😱', label: 'Biggest upset', who: d.upset.winner,
+        value: `beat ${nameOf(d.upset.loser)} ${d.upset.ws}–${d.upset.ls}`,
+        detail: `Had a ${Math.round(d.upset.chance * 100)}% chance · ${fmtDate(d.upset.date, { year: undefined })}`,
+      });
+    }
+
+    const pairs = new Map();
+    for (const g of d.games) {
+      const key = [g.player_a, g.player_b].sort().join('|');
+      pairs.set(key, (pairs.get(key) || 0) + 1);
+    }
+    const rival = best([...pairs.keys()], (k) => pairs.get(k));
+    if (rival && pairs.get(rival) >= 3) {
+      const [a, b] = rival.split('|');
+      const o = d.stats.get(a).opp.get(b);
+      awards.push({
+        icon: '🤝', label: 'Fiercest rivalry', title: `${nameOf(a)} vs ${nameOf(b)}`,
+        value: `${o.wins}–${o.games - o.wins} over ${plural(o.games, 'game')}`,
+      });
+    }
+
+    if (d.marathon && d.marathon.g.score_a + d.marathon.g.score_b > 22) {
+      const g = d.marathon.g;
+      awards.push({
+        icon: '🏃', label: 'Marathon game', title: `${nameOf(g.player_a)} ${g.score_a}–${g.score_b} ${nameOf(g.player_b)}`,
+        value: `${g.score_a + g.score_b} points played`, detail: fmtDate(d.marathon.date, { year: undefined }),
+      });
+    }
+
+    const bagels = new Map();
+    for (const g of d.games) {
+      if (Math.min(g.score_a, g.score_b) === 0) {
+        const w = g.score_a > g.score_b ? g.player_a : g.player_b;
+        bagels.set(w, (bagels.get(w) || 0) + 1);
+      }
+    }
+    const baker = best([...bagels.keys()], (pid) => bagels.get(pid));
+    if (baker) awards.push({ icon: '🥯', label: 'Bagels served', who: baker, value: `${plural(bagels.get(baker), 'game')} won without conceding a point` });
+
+    const yearAgo = addYears(today, -1);
+    const recentSessions = d.sessions.filter((x) => x.played_on > yearAgo);
+    const recentGames = recentSessions.reduce((n, x) => n + (d.gamesBySession.get(x.id) || []).length, 0);
+    const rallies = recentSessions.reduce((n, x) => n + (d.gamesBySession.get(x.id) || []).reduce((m, g) => m + g.score_a + g.score_b, 0), 0);
+    if (recentSessions.length) {
+      awards.push({
+        icon: '🎾', label: 'The group, last 12 months', title: plural(recentSessions.length, 'session'),
+        value: `${plural(recentGames, 'game')}, ${rallies.toLocaleString('en-GB')} points played`,
+      });
+    }
+
+    const card = h('section', { class: 'card' },
+      h('h2', null, 'Records & bragging rights'),
+      h('p', { class: 'sub' }, 'Updated after every session. Something to aim for next weekend.'));
+    if (!awards.length) {
+      card.append(h('p', { class: 'empty' }, 'Log a few sessions and games to unlock the records.'));
+      return card;
+    }
+    card.append(h('div', { class: 'awards' }, awards.map((a) => h('div', { class: 'award' },
+      h('div', { class: 'award-icon', 'aria-hidden': 'true' }, a.icon),
+      h('div', null,
+        h('div', { class: 'label' }, a.label),
+        h('div', { class: 'award-who' }, a.who ? [dotFor(a.who), nameOf(a.who)] : a.title),
+        h('div', { class: 'award-value' }, a.value),
+        a.detail ? h('div', { class: 'delta' }, a.detail) : null)))));
     return card;
   }
 
@@ -1059,16 +1251,31 @@
         onchange: (e) => { location.hash = '#players/' + encodeURIComponent(e.target.value); },
       }, d.players.map((x) => h('option', { value: x.id, selected: x.id === pid }, x.name)))));
 
-    if (!st.games) {
-      frag.append(h('p', { class: 'empty' }, `${p.name} hasn't played any logged games yet.`));
-      return frag;
-    }
-
     const today = todayIso();
     const subYr = subYear(p, 0);
     const visitWindow = subYr
       ? { ...visitValue(d, pid, subYr.start, subYr.end), label: `since ${fmtDate(subYr.start)}` }
       : { ...visitValue(d, pid, addYears(today, -1), fromTime(toTime(today) + DAY)), label: 'last 12 months' };
+    const ws = st.weekStreak;
+    const visitTiles = [
+      tile('Visits', visitWindow.visits, `${visitWindow.label} · worth ${fmtEuro(visitWindow.total)}`),
+      tile('Week streak', ws.current >= 2 ? `🔥 ${ws.current}` : ws.current,
+        `${ws.onTheLine ? 'On the line: play before Sunday' : ws.current ? 'Played this week' : 'Play this week to start one'} · best ${ws.best}`),
+    ];
+
+    if (!st.games) {
+      frag.append(h('div', { class: 'tiles' }, visitTiles));
+      frag.append(h('p', { class: 'empty' }, `${p.name} hasn't played any logged games yet.`));
+      return frag;
+    }
+
+    // Nemesis and favourite opponent need a few games to mean anything.
+    const opps3 = [...st.opp.entries()].filter(([, o]) => o.games >= 3);
+    const rate = ([, o]) => o.wins / o.games + o.pf / (o.pf + o.pa) / 100;
+    const nemesis = opps3.length ? opps3.reduce((a, b) => (rate(b) < rate(a) ? b : a)) : null;
+    const favourite = opps3.length >= 2 ? opps3.reduce((a, b) => (rate(b) > rate(a) ? b : a)) : null;
+    const oppTile = (label, entry) => (entry ? tile(label, h('span', { class: 'player-cell' }, dotFor(entry[0]), nameOf(entry[0])),
+      `${entry[1].wins}–${entry[1].games - entry[1].wins} · avg ${fmt1(entry[1].pf / entry[1].games)}–${fmt1(entry[1].pa / entry[1].games)}`) : null);
     const first = st.perSession.slice(0, 3);
     const last = st.perSession.slice(-3);
     const avg = (xs) => xs.reduce((a, x) => a + x.pf, 0) / xs.reduce((a, x) => a + x.games, 0);
@@ -1080,7 +1287,10 @@
       tile('Win rate', fmtPct(st.wins / st.games), ''),
       tile('Points per game', fmt1(st.pf / st.games),
         trend == null ? `conceded ${fmt1(st.pa / st.games)}` : h('span', { class: trend > 0.05 ? 'delta-up' : trend < -0.05 ? 'delta-down' : '' }, `${trend >= 0 ? '+' : '−'}${Math.abs(trend).toFixed(1)} vs first 3 sessions`)),
-      tile('Visits', visitWindow.visits, `${visitWindow.label} · worth ${fmtEuro(visitWindow.total)}`)));
+      visitTiles,
+      tile('Win streak', st.winStreak.current, `best ${st.winStreak.best}`),
+      oppTile('Nemesis', nemesis),
+      favourite && favourite[0] !== nemesis?.[0] ? oppTile('Favourite opponent', favourite) : null));
 
     frag.append(h('div', { class: 'grid-2' },
       h('section', { class: 'card' },

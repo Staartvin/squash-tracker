@@ -3,7 +3,8 @@
 A single static page that tracks:
 
 - **Subscription break-even:** for each subscriber, how much their visits this season would have cost without a subscription, measured against €315.
-- **Leaderboard:** a rating for every player, plus wins, win % and points per game.
+- **Leaderboard:** a rating for every player, plus wins, win %, points per game and week streaks.
+- **Records & bragging rights:** longest week streak, regular of the month, hot hand, biggest upset, fiercest rivalry, marathon game and more.
 - **Progress:** each player's points per game and rating over time, and their record against each opponent.
 - **History and input:** log a visit and its games from your phone at the club, protected by a shared group code.
 
@@ -85,6 +86,10 @@ If you set up the database before a change that needs one, run the matching file
 For people without a subscription, the dashboard shows what their visits over the last 12 months cost, and how much more it would take for a subscription to pay off.
 
 **Rating.** Everyone starts at 1000. After each game, rating points move from one player to the other depending on how the result compares with what the ratings predicted (Elo, K = 32). A game's result is half the win and half your share of the points. So losing 9–11 to a much stronger player can still raise your rating, and getting better shows up before you start winning.
+
+**Week streak.** The number of weeks in a row (Monday to Sunday) with at least one visit. A streak isn't broken until a whole week passes without a visit, so on Monday it's "on the line" and the leaderboard reminds everyone to play before Sunday.
+
+**Records.** The upset is the win the ratings rated least likely at the time (under 40%). Nemesis and favourite opponent on a player's page need at least 3 games against that person.
 
 ## Notes
 
