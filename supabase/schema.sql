@@ -93,9 +93,15 @@ create table if not exists public.games (
   player_b   uuid        not null references public.players (id) on delete restrict,
   score_a    smallint    not null check (score_a between 0 and 99),
   score_b    smallint    not null check (score_b between 0 and 99),
+  -- Head start: the score a player starts on, e.g. 4 for "starts at 4-0".
+  -- score_a/score_b are the final scoreboard, head start included.
+  start_a    smallint    not null default 0,
+  start_b    smallint    not null default 0,
   created_at timestamptz not null default now(),
   check (player_a <> player_b),
-  check (score_a <> score_b)
+  check (score_a <> score_b),
+  constraint games_head_start_check
+    check (start_a between 0 and 10 and start_b between 0 and 10 and score_a >= start_a and score_b >= start_b)
 );
 
 create index if not exists games_session_idx on public.games (session_id);
@@ -137,6 +143,31 @@ exception when sqlstate '28000' then
 end;
 $$;
 
+-- Inserts games from JSON: [{"a": uuid, "b": uuid, "sa": 11, "sb": 7, "ha": 0, "hb": 4}, ...]
+create or replace function private.insert_games(p_session_id uuid, p_games jsonb)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  insert into public.games (session_id, player_a, player_b, score_a, score_b, start_a, start_b)
+  select p_session_id, (g ->> 'a')::uuid, (g ->> 'b')::uuid, (g ->> 'sa')::smallint, (g ->> 'sb')::smallint,
+         coalesce((g ->> 'ha')::smallint, 0), coalesce((g ->> 'hb')::smallint, 0)
+  from jsonb_array_elements(coalesce(p_games, '[]'::jsonb)) with ordinality as t(g, n)
+  order by n;
+
+  -- Everyone who played a game was there.
+  insert into public.attendance (session_id, player_id)
+  select p_session_id, player_a from public.games where session_id = p_session_id
+  union
+  select p_session_id, player_b from public.games where session_id = p_session_id
+  on conflict do nothing;
+end;
+$$;
+
+revoke execute on function private.insert_games(uuid, jsonb) from public, anon, authenticated;
+
 -- Logs a visit plus its games. Logging the same date and slot twice adds to
 -- the existing session instead of creating a second one, so a visit is never
 -- counted twice for break-even.
@@ -169,19 +200,52 @@ begin
   select v_id, pid from unnest(coalesce(p_player_ids, '{}')) as pid
   on conflict do nothing;
 
-  insert into public.games (session_id, player_a, player_b, score_a, score_b)
-  select v_id, (g ->> 'a')::uuid, (g ->> 'b')::uuid, (g ->> 'sa')::smallint, (g ->> 'sb')::smallint
-  from jsonb_array_elements(coalesce(p_games, '[]'::jsonb)) with ordinality as t(g, n)
-  order by n;
+  perform private.insert_games(v_id, p_games);
+  return v_id;
+end;
+$$;
 
-  -- Everyone who played a game was there.
+-- Replaces a session's date, slot, note, attendance and games in one go.
+create or replace function public.update_session(
+  p_code       text,
+  p_id         uuid,
+  p_played_on  date,
+  p_slot       text,
+  p_player_ids uuid[],
+  p_games      jsonb default '[]'::jsonb,
+  p_note       text  default null
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  perform private.check_code(p_code);
+
+  if exists (
+    select 1 from public.sessions
+    where played_on = p_played_on and slot = p_slot and id <> p_id
+  ) then
+    raise exception 'There is already another session on that date and time slot.';
+  end if;
+
+  update public.sessions
+  set played_on = p_played_on, slot = p_slot, note = nullif(btrim(p_note), '')
+  where id = p_id;
+  if not found then
+    raise exception 'That session no longer exists.';
+  end if;
+
+  delete from public.games where session_id = p_id;
+  delete from public.attendance where session_id = p_id;
+
   insert into public.attendance (session_id, player_id)
-  select v_id, player_a from public.games where session_id = v_id
-  union
-  select v_id, player_b from public.games where session_id = v_id
+  select p_id, pid from unnest(coalesce(p_player_ids, '{}')) as pid
   on conflict do nothing;
 
-  return v_id;
+  perform private.insert_games(p_id, p_games);
+  return p_id;
 end;
 $$;
 
@@ -266,6 +330,7 @@ revoke execute on function private.check_code(text) from public, anon, authentic
 revoke execute on function
   public.verify_code(text),
   public.log_session(text, date, text, uuid[], jsonb, text),
+  public.update_session(text, uuid, date, text, uuid[], jsonb, text),
   public.delete_game(text, bigint),
   public.delete_session(text, uuid),
   public.remove_attendance(text, uuid, uuid),
@@ -275,6 +340,7 @@ from public;
 grant execute on function
   public.verify_code(text),
   public.log_session(text, date, text, uuid[], jsonb, text),
+  public.update_session(text, uuid, date, text, uuid[], jsonb, text),
   public.delete_game(text, bigint),
   public.delete_session(text, uuid),
   public.remove_attendance(text, uuid, uuid),

@@ -5,7 +5,10 @@ A single static page that tracks:
 - **Subscription break-even:** for each subscriber, how much their visits this season would have cost without a subscription, measured against €315.
 - **Leaderboard:** a rating for every player, plus wins, win %, points per game and week streaks.
 - **Records & bragging rights:** longest week streak, regular of the month, hot hand, biggest upset, fiercest rivalry, marathon game and more.
-- **Progress:** each player's points per game and rating over time, and their record against each opponent.
+- **Progress:** each player's points per game and rating over time, a GitHub-style activity calendar, milestones with what's next, and their record against each opponent.
+- **Head-to-head heatmap:** who usually beats whom, at a glance.
+- **Suggested head starts:** for uneven matches, e.g. "Vincent starts at 4–0", based on the ratings.
+- **Monthly recap:** highlights, break-even progress and new milestones, with a copy-for-WhatsApp button.
 - **History and input:** log a visit and its games from your phone at the club, protected by a shared group code.
 
 No build step. The page is plain HTML, CSS and JavaScript, and the data lives in a free Supabase database.
@@ -62,11 +65,13 @@ The page uses relative paths, so you can also copy `index.html`, `styles.css`, `
 If you set up the database before a change that needs one, run the matching file in the Supabase SQL Editor once (fresh installs via `schema.sql` already include it):
 
 - `supabase/002_subscription_start.sql`: gives each player their own subscription start date.
+- `supabase/003_head_starts_and_editing.sql`: head starts per game, and editing a whole session at once.
 
 ## Day to day
 
 - **Log a visit:** on the **+ Log** page, pick the date and slot, tick who was there and add each game, for example 9–11. Logging the same date and slot again adds to that session, so a visit is never counted twice.
-- **Fix a mistake:** with the group code entered, the **History** page shows × buttons to delete games, remove people from a session or delete a whole session.
+- **Fix a mistake:** with the group code entered, press **Edit** on a session in **History**. You can change the date, slot, who was there and every game, or delete the session.
+- **Head starts:** when you pick two players for a game, the form suggests a head start if their ratings differ. Press **Use** to apply it, and enter the final scoreboard (head start included).
 - **Change the group code:** run this in the Supabase SQL Editor:
 
   ```sql
@@ -90,6 +95,8 @@ For people without a subscription, the dashboard shows what their visits over th
 **Week streak.** The number of weeks in a row (Monday to Sunday) with at least one visit. A streak isn't broken until a whole week passes without a visit, so on Monday it's "on the line" and the leaderboard reminds everyone to play before Sunday.
 
 **Records.** The upset is the win the ratings rated least likely at the time (under 40%). Nemesis and favourite opponent on a player's page need at least 3 games against that person.
+
+**Head starts.** One point of head start counts as about 40 rating points, so a 200-point gap suggests starting at 5–0 (at most 8). Ratings take the head start into account: winning with one earns less than winning level, and points per game only count points actually won.
 
 ## Notes
 

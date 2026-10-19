@@ -30,6 +30,10 @@
   const ELO_START = 1000;
   const ELO_K = 32;
   const PROVISIONAL_GAMES = 5;
+  // A head start of one point is worth about this many rating points, so a
+  // 200-point gap suggests the weaker player starts at 5-0.
+  const HANDICAP_RATING = 40;
+  const MAX_HANDICAP = 8;
   const SERIES_SLOTS = 8;
 
   // ---------------------------------------------------------------------------
@@ -170,7 +174,7 @@
     let best = 0;
     let run = 0;
     for (const g of recent) {
-      run = g.pf > g.pa ? run + 1 : 0;
+      run = g.won ? run + 1 : 0;
       best = Math.max(best, run);
     }
     return { current: run, best };
@@ -229,6 +233,9 @@
       logSession: (code, x) => rpc('log_session', {
         p_code: code, p_played_on: x.date, p_slot: x.slot, p_player_ids: x.playerIds, p_games: x.games, p_note: x.note || null,
       }),
+      updateSession: (code, x) => rpc('update_session', {
+        p_code: code, p_id: x.id, p_played_on: x.date, p_slot: x.slot, p_player_ids: x.playerIds, p_games: x.games, p_note: x.note || null,
+      }),
       deleteGame: (code, id) => rpc('delete_game', { p_code: code, p_id: id }),
       deleteSession: (code, id) => rpc('delete_session', { p_code: code, p_id: id }),
       removeAttendance: (code, sessionId, playerId) => rpc('remove_attendance', { p_code: code, p_session_id: sessionId, p_player_id: playerId }),
@@ -267,7 +274,7 @@
         }
         const ids = new Set(x.playerIds);
         for (const g of x.games) {
-          db.games.push({ id: ++db.seq, session_id: sess.id, player_a: g.a, player_b: g.b, score_a: g.sa, score_b: g.sb, created_at: new Date().toISOString() });
+          db.games.push({ id: ++db.seq, session_id: sess.id, player_a: g.a, player_b: g.b, score_a: g.sa, score_b: g.sb, start_a: g.ha || 0, start_b: g.hb || 0, created_at: new Date().toISOString() });
           ids.add(g.a);
           ids.add(g.b);
         }
@@ -276,6 +283,19 @@
         }
         write();
         return sess.id;
+      },
+      async updateSession(code, x) {
+        check(code);
+        if (db.sessions.some((r) => r.played_on === x.date && r.slot === x.slot && r.id !== x.id)) {
+          throw new Error('There is already another session on that date and time slot.');
+        }
+        const sess = db.sessions.find((r) => r.id === x.id);
+        if (!sess) throw new Error('That session no longer exists.');
+        Object.assign(sess, { played_on: x.date, slot: x.slot, note: x.note || null });
+        db.games = db.games.filter((g) => g.session_id !== x.id);
+        db.attendance = db.attendance.filter((a) => a.session_id !== x.id);
+        write();
+        return this.logSession(code, x);
       },
       async deleteGame(code, id) {
         check(code);
@@ -407,7 +427,13 @@
         if (!A || !B) continue;
         if (!before.has(g.player_a)) before.set(g.player_a, A.rating);
         if (!before.has(g.player_b)) before.set(g.player_b, B.rating);
-        const expected = 1 / (1 + Math.pow(10, (B.rating - A.rating) / 400));
+        // A head start counts as extra rating for the expectation, so winning
+        // with a head start earns less than winning level.
+        const ha = g.start_a || 0;
+        const hb = g.start_b || 0;
+        const rA0 = A.rating;
+        const rB0 = B.rating;
+        const expected = 1 / (1 + Math.pow(10, (rB0 - rA0 - HANDICAP_RATING * (ha - hb)) / 400));
         const share = g.score_a / (g.score_a + g.score_b);
         const actual = 0.5 * (g.score_a > g.score_b ? 1 : 0) + 0.5 * share;
         const delta = ELO_K * (actual - expected);
@@ -423,8 +449,8 @@
         if (!marathon || g.score_a + g.score_b > marathon.g.score_a + marathon.g.score_b) marathon = { g, date: sess.played_on };
         A.rating += delta;
         B.rating -= delta;
-        record(A, g.player_a, g.player_b, g.score_a, g.score_b);
-        record(B, g.player_b, g.player_a, g.score_b, g.score_a);
+        record(A, g.player_a, g.player_b, { won: aWon, pf: g.score_a - ha, pa: g.score_b - hb, sf: g.score_a, so: g.score_b, hf: ha, ho: hb, chance: expected, ownRating: rA0, oppRating: rB0 });
+        record(B, g.player_b, g.player_a, { won: !aWon, pf: g.score_b - hb, pa: g.score_a - ha, sf: g.score_b, so: g.score_a, hf: hb, ho: ha, chance: 1 - expected, ownRating: rB0, oppRating: rA0 });
       }
       for (const [pid, r0] of before) {
         const P = stats.get(pid);
@@ -434,8 +460,10 @@
         P.perSession.push({ x: sess.played_on, y: t.pf / t.games, games: t.games, wins: t.wins, pf: t.pf, pa: t.pa });
       }
 
-      function record(P, pid, oppId, pf, pa) {
-        const won = pf > pa;
+      // pf/pa are points actually won in rallies (head start excluded);
+      // sf/so are the final scoreboard.
+      function record(P, pid, oppId, x) {
+        const { won, pf, pa } = x;
         P.games++;
         P.wins += won ? 1 : 0;
         P.pf += pf;
@@ -447,7 +475,7 @@
         o.pf += pf;
         o.pa += pa;
         o.results.push(won ? 'W' : 'L');
-        P.recent.push({ date: sess.played_on, oppId, pf, pa });
+        P.recent.push(Object.assign({ date: sess.played_on, oppId }, x));
         if (!tally.has(pid)) tally.set(pid, { games: 0, wins: 0, pf: 0, pa: 0 });
         const t = tally.get(pid);
         t.games++;
@@ -861,7 +889,7 @@
 
   function route() {
     const [view, arg] = (location.hash.replace(/^#/, '') || 'dashboard').split('/');
-    return { view: ['dashboard', 'players', 'history', 'log'].includes(view) ? view : 'dashboard', arg: arg ? decodeURIComponent(arg) : null };
+    return { view: ['dashboard', 'players', 'recap', 'history', 'log'].includes(view) ? view : 'dashboard', arg: arg ? decodeURIComponent(arg) : null };
   }
 
   function render() {
@@ -885,7 +913,7 @@
       return;
     }
     const scrollY = window.scrollY;
-    const views = { dashboard: viewDashboard, players: () => viewPlayers(arg), history: viewHistory, log: viewLog };
+    const views = { dashboard: viewDashboard, players: () => viewPlayers(arg), recap: () => viewRecap(arg), history: viewHistory, log: viewLog };
     app.replaceChildren(views[view]());
     if (view === 'log') window.scrollTo(0, scrollY);
   }
@@ -1187,14 +1215,18 @@
       card.append(h('p', { class: 'empty' }, 'Log a few sessions and games to unlock the records.'));
       return card;
     }
-    card.append(h('div', { class: 'awards' }, awards.map((a) => h('div', { class: 'award' },
+    card.append(h('div', { class: 'awards' }, awards.map(awardEl)));
+    return card;
+  }
+
+  function awardEl(a) {
+    return h('div', { class: 'award' },
       h('div', { class: 'award-icon', 'aria-hidden': 'true' }, a.icon),
       h('div', null,
         h('div', { class: 'label' }, a.label),
         h('div', { class: 'award-who' }, a.who ? [dotFor(a.who), nameOf(a.who)] : a.title),
         h('div', { class: 'award-value' }, a.value),
-        a.detail ? h('div', { class: 'delta' }, a.detail) : null)))));
-    return card;
+        a.detail ? h('div', { class: 'delta' }, a.detail) : null));
   }
 
   function ratingChartCard() {
@@ -1211,24 +1243,33 @@
       }));
   }
 
+  // Head to head as a heatmap: blue = the row player wins most, red = loses most,
+  // grey = even. Fewer than 5 games tones the colour down.
   function headToHeadCard() {
     const d = state.d;
     const ps = d.ranked;
+    const fill = (o) => {
+      const t = (o.wins / o.games - 0.5) * 2;
+      const strength = Math.round(Math.abs(t) * Math.min(1, o.games / 5) * 60);
+      return `color-mix(in srgb, var(${t >= 0 ? '--div-pos' : '--div-neg'}) ${strength}%, var(--div-mid))`;
+    };
     return h('section', { class: 'card' },
       h('h2', null, 'Head to head'),
-      h('p', { class: 'sub' }, 'Row player\'s record against the column player: wins–losses, then average score per game.'),
-      h('div', { class: 'table-wrap' }, h('table', { class: 'data' },
-        h('thead', null, h('tr', null, h('th', null, ''), ps.map((p) => h('th', { class: 'num' }, h('span', { class: 'player-cell' }, dotFor(p.id), p.name))))),
+      h('p', { class: 'sub' }, 'Each row is that player\'s record against the column player: wins–losses, then average score. Blue means the row player usually wins, red means they usually lose.'),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'data h2h' },
+        h('thead', null, h('tr', null, h('th', null, ''), ps.map((p) => h('th', { class: 'num', style: 'text-align:center' }, h('span', { class: 'player-cell' }, dotFor(p.id), p.name))))),
         h('tbody', null, ps.map((row) => h('tr', null,
           h('th', { scope: 'row' }, h('span', { class: 'player-cell' }, dotFor(row.id), row.name)),
           ps.map((col) => {
-            if (row.id === col.id) return h('td', { class: 'num muted' }, '');
+            if (row.id === col.id) return h('td', { class: 'cell self' }, '');
             const o = d.stats.get(row.id).opp.get(col.id);
-            if (!o) return h('td', { class: 'num muted' }, '–');
-            return h('td', { class: 'num' },
+            if (!o) return h('td', { class: 'cell muted', style: 'background:var(--div-mid)' }, '–');
+            const label = `${row.name} vs ${col.name}: ${o.wins}–${o.games - o.wins}, average ${fmt1(o.pf / o.games)}–${fmt1(o.pa / o.games)}`;
+            return h('td', { class: 'cell num', style: `background:${fill(o)}`, title: label, 'aria-label': label },
               h('div', null, h('strong', null, `${o.wins}–${o.games - o.wins}`)),
               h('div', { class: 'muted small' }, `${fmt1(o.pf / o.games)}–${fmt1(o.pa / o.games)}`));
-          })))))));
+          })))))),
+      h('div', { class: 'h2h-legend', 'aria-hidden': 'true' }, 'Loses most', h('span', { class: 'h2h-scale' }), 'Wins most', h('span', null, '· paler when fewer than 5 games')));
   }
 
   // ----- Players
@@ -1265,6 +1306,7 @@
 
     if (!st.games) {
       frag.append(h('div', { class: 'tiles' }, visitTiles));
+      frag.append(activityCard(pid), milestonesCard(pid));
       frag.append(h('p', { class: 'empty' }, `${p.name} hasn't played any logged games yet.`));
       return frag;
     }
@@ -1311,30 +1353,414 @@
           curve: 'linear', dots: st.history.length <= 40, height: 200,
         }))));
 
+    frag.append(activityCard(pid), milestonesCard(pid));
+
     const opps = [...st.opp.entries()].sort((a, b) => b[1].games - a[1].games);
     frag.append(h('section', { class: 'card' },
       h('h2', null, 'Against each opponent'),
       h('div', { class: 'table-wrap' }, h('table', { class: 'data' },
-        h('thead', null, h('tr', null, h('th', null, 'Opponent'), h('th', { class: 'num' }, 'Games'), h('th', { class: 'num' }, 'W–L'), h('th', { class: 'num' }, 'Avg score'), h('th', { class: 'num' }, 'Last 5'))),
+        h('thead', null, h('tr', null, h('th', null, 'Opponent'), h('th', { class: 'num' }, 'Games'), h('th', { class: 'num' }, 'W–L'), h('th', { class: 'num' }, 'Avg score'), h('th', { class: 'num' }, 'Last 5'), h('th', { class: 'num', title: 'Suggested head start from the current ratings' }, 'Head start'))),
         h('tbody', null, opps.map(([oid, o]) => h('tr', null,
           h('td', null, h('span', { class: 'player-cell' }, dotFor(oid), nameOf(oid))),
           h('td', { class: 'num' }, o.games),
           h('td', { class: 'num' }, `${o.wins}–${o.games - o.wins}`),
           h('td', { class: 'num' }, `${fmt1(o.pf / o.games)}–${fmt1(o.pa / o.games)}`),
-          h('td', { class: 'num' }, o.results.slice(-5).join(' ')))))))));
+          h('td', { class: 'num' }, o.results.slice(-5).join(' ')),
+          h('td', { class: 'num' }, (() => {
+            const sug = suggestHandicap(pid, oid);
+            if (!sug || !sug.pts) return 'Even';
+            return `${nameOf(sug.who)} starts at ${sug.pts}–0`;
+          })()))))))));
 
     frag.append(h('section', { class: 'card' },
       h('h2', null, 'Recent games'),
       h('ul', { class: 'game-list' }, st.recent.slice(-10).reverse().map((g) => h('li', null,
         h('span', { class: 'muted small', style: 'min-width:92px' }, fmtDay(g.date)),
-        h('span', { class: 'score' }, `${g.pf}–${g.pa}`),
-        h('span', { class: 'muted' }, g.pf > g.pa ? 'beat' : 'lost to'),
+        h('span', { class: 'score' }, `${g.sf}–${g.so}`),
+        h('span', { class: 'muted' }, g.won ? 'beat' : 'lost to'),
         h('span', { class: 'side' }, dotFor(g.oppId), h('span', null, nameOf(g.oppId))))))));
     return frag;
   }
 
+  // Milestones a player has reached (with the date) and the next few to aim for.
+  function milestones(d, pid) {
+    const st = d.stats.get(pid);
+    const done = [];
+    const next = [];
+    const add = (icon, label, date) => done.push({ icon, label, date });
+
+    const counted = (dates, thresholds, icon, label) => {
+      for (const t of thresholds) {
+        if (dates.length >= t) add(icon, label(t), dates[t - 1]);
+        else { next.push({ icon, label: label(t), have: dates.length, need: t }); break; }
+      }
+    };
+    const visitDates = d.sessions.filter((x) => d.attBySession.get(x.id)?.has(pid)).map((x) => x.played_on);
+    counted(visitDates, [1, 10, 25, 50, 100, 200], '🏟️', (t) => (t === 1 ? 'First visit' : `${t} visits`));
+    counted(st.recent.map((g) => g.date), [1, 25, 50, 100, 250, 500], '🎾', (t) => (t === 1 ? 'First game' : `${t} games played`));
+    counted(st.recent.filter((g) => g.won).map((g) => g.date), [1, 10, 25, 50, 100], '🏆', (t) => (t === 1 ? 'First win' : `${t} wins`));
+
+    // First win against each opponent.
+    const firstWin = new Map();
+    const closest = new Map();
+    for (const g of st.recent) {
+      if (g.won && !firstWin.has(g.oppId)) firstWin.set(g.oppId, g.date);
+      if (!g.won && (!closest.has(g.oppId) || g.so - g.sf < closest.get(g.oppId).so - closest.get(g.oppId).sf)) closest.set(g.oppId, g);
+    }
+    for (const [oid, date] of firstWin) add('🎯', `First win vs ${nameOf(oid)}`, date);
+    const unbeaten = [...st.opp.entries()].filter(([oid]) => !firstWin.has(oid)).sort((a, b) => b[1].games - a[1].games);
+    for (const [oid] of unbeaten.slice(0, 2)) {
+      const c = closest.get(oid);
+      next.push({ icon: '🎯', label: `First win vs ${nameOf(oid)}`, note: c ? `Closest so far: ${c.sf}–${c.so}` : null });
+    }
+
+    const firstWhere = (fn) => st.recent.find(fn);
+    const special = [
+      ['💪', 'Took 9+ points off a much stronger player', (g) => !g.won && g.pf >= 9 && g.oppRating - g.ownRating >= 100],
+      ['😱', 'Giant killer: won with under a 30% chance', (g) => g.won && g.chance < 0.3],
+      ['🥯', 'Served a bagel (won 11–0)', (g) => g.won && g.so === 0],
+      ['🏃', 'Marathon game (26+ points)', (g) => g.sf + g.so >= 26],
+    ];
+    for (const [icon, label, fn] of special) {
+      const g = firstWhere(fn);
+      if (g) add(icon, label, g.date);
+    }
+
+    // Week streaks reached.
+    const weekTargets = [4, 8, 12, 26, 52];
+    let run = 0;
+    let prevWeek = null;
+    let wi = 0;
+    for (const date of visitDates) {
+      const w = weekOf(date);
+      if (w === prevWeek) continue;
+      run = prevWeek != null && w === prevWeek + 1 ? run + 1 : 1;
+      prevWeek = w;
+      while (wi < weekTargets.length && run >= weekTargets[wi]) add('🔥', `${weekTargets[wi]}-week streak`, date), wi++;
+    }
+    if (wi < weekTargets.length) next.push({ icon: '🔥', label: `${weekTargets[wi]}-week streak`, have: st.weekStreak.current, need: weekTargets[wi] });
+
+    // Win streaks reached.
+    const winTargets = [3, 5, 10];
+    let wrun = 0;
+    let ti = 0;
+    for (const g of st.recent) {
+      wrun = g.won ? wrun + 1 : 0;
+      while (ti < winTargets.length && wrun >= winTargets[ti]) add('⚡', `${winTargets[ti]} wins in a row`, g.date), ti++;
+    }
+    if (ti < winTargets.length && st.games) next.push({ icon: '⚡', label: `${winTargets[ti]} wins in a row`, have: st.winStreak.current, need: winTargets[ti] });
+
+    // Climbing from your lowest rating: rewards improving, wherever you start.
+    const climbTargets = [50, 100, 200];
+    let low = ELO_START;
+    let ci = 0;
+    let bestClimb = 0;
+    for (const pt of st.history) {
+      low = Math.min(low, pt.y);
+      bestClimb = Math.max(bestClimb, pt.y - low);
+      while (ci < climbTargets.length && pt.y - low >= climbTargets[ci]) add('📈', `Climbed ${climbTargets[ci]} above your lowest rating`, pt.x), ci++;
+    }
+    if (ci < climbTargets.length && st.games) {
+      const cur = st.history.length ? st.rating - low : 0;
+      next.push({ icon: '📈', label: `Climb ${climbTargets[ci]} above your lowest rating`, have: Math.max(0, Math.round(cur)), need: climbTargets[ci] });
+    }
+
+    // Average points per game in a single session.
+    const avgTargets = [5, 7, 9];
+    let ai = 0;
+    for (const ps of st.perSession) {
+      while (ai < avgTargets.length && ps.games >= 2 && ps.y >= avgTargets[ai]) add('🎯', `Averaged ${avgTargets[ai]}+ points per game in a session`, ps.x), ai++;
+    }
+    if (ai < avgTargets.length && st.games) next.push({ icon: '🎯', label: `Average ${avgTargets[ai]}+ points per game in a session` });
+
+    // Subscription paid for itself.
+    const p = d.pById.get(pid);
+    const years = subYearsDone(p);
+    if (years != null) {
+      for (let ago = years; ago >= 0; ago--) {
+        const row = breakEven(d, ago).find((r) => r.player.id === pid);
+        if (row && row.crossed) add('💶', `Subscription paid for itself (${row.season.start.slice(0, 4)}–${row.season.end.slice(2, 4)})`, row.crossed);
+      }
+    }
+
+    // Played against everyone who has played.
+    const others = d.players.filter((x) => x.id !== pid && d.stats.get(x.id).games > 0);
+    if (others.length >= 2 && others.every((x) => st.opp.has(x.id))) {
+      const firstMeet = others.map((x) => st.recent.find((g) => g.oppId === x.id).date).sort();
+      add('🤝', 'Played against everyone', firstMeet[firstMeet.length - 1]);
+    }
+
+    done.sort((a, b) => b.date.localeCompare(a.date));
+    next.sort((a, b) => (b.need ? b.have / b.need : 0.5) - (a.need ? a.have / a.need : 0.5));
+    return { done, next: next.slice(0, 4) };
+  }
+
+  function milestonesCard(pid) {
+    const { done, next } = milestones(state.d, pid);
+    return h('section', { class: 'card' },
+      h('div', { class: 'card-head' }, h('h2', null, 'Milestones'), h('span', { class: 'muted small' }, `${done.length} unlocked`)),
+      next.length ? h('div', { class: 'next-up' },
+        h('h3', null, 'Next up'),
+        next.map((m) => h('div', { class: 'next-item' },
+          h('span', { class: 'ms-icon', 'aria-hidden': 'true' }, m.icon),
+          h('div', { class: 'next-body' },
+            h('div', null, m.label, m.need ? h('span', { class: 'muted small' }, ` · ${m.have} of ${m.need}`) : null, m.note ? h('span', { class: 'muted small' }, ` · ${m.note}`) : null),
+            m.need ? h('div', { class: 'meter-track small-track', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': m.need, 'aria-valuenow': m.have, 'aria-label': m.label },
+              h('div', { class: 'meter-fill', style: `width:${Math.min(100, (m.have / m.need) * 100).toFixed(1)}%` })) : null)))) : null,
+      done.length
+        ? h('div', { class: 'badges' }, done.map((m) => h('div', { class: 'badge' },
+          h('span', { class: 'ms-icon', 'aria-hidden': 'true' }, m.icon),
+          h('div', null, h('div', { class: 'badge-label' }, m.label), h('div', { class: 'muted small' }, fmtDate(m.date))))))
+        : h('p', { class: 'empty' }, 'No milestones yet. The first one unlocks with the first visit.'));
+  }
+
+  // GitHub-style calendar of the last year: one square per day, darker = more games.
+  function activityCard(pid) {
+    const d = state.d;
+    const st = d.stats.get(pid);
+    const today = todayIso();
+    const byDay = new Map();
+    for (const sess of d.sessions) {
+      if (!d.attBySession.get(sess.id)?.has(pid)) continue;
+      const day = byDay.get(sess.played_on) || { visit: true, games: 0, wins: 0 };
+      byDay.set(sess.played_on, day);
+    }
+    for (const g of st.recent) {
+      const day = byDay.get(g.date) || { visit: true, games: 0, wins: 0 };
+      day.games++;
+      day.wins += g.won ? 1 : 0;
+      byDay.set(g.date, day);
+    }
+    const level = (day) => (!day ? 0 : day.games === 0 ? 1 : day.games <= 3 ? 2 : day.games <= 6 ? 3 : 4);
+
+    const WEEKS = 53;
+    const thisMonday = toTime(today) - ((weekday(today) + 6) % 7) * DAY;
+    const firstMonday = thisMonday - (WEEKS - 1) * 7 * DAY;
+    const grid = h('div', { class: 'cal-grid', style: `grid-template-columns: 28px repeat(${WEEKS}, 12px)` });
+    // Month labels row.
+    grid.append(h('span'));
+    // Label the first full week of each month, keeping labels at least 3 weeks apart.
+    let lastMonth = new Date(firstMonday).getUTCMonth();
+    let lastLabel = -3;
+    for (let w = 0; w < WEEKS; w++) {
+      const m = new Date(firstMonday + w * 7 * DAY).getUTCMonth();
+      const show = m !== lastMonth && w - lastLabel >= 3 && w < WEEKS - 2;
+      grid.append(h('span', { class: 'cal-month' }, show ? new Date(firstMonday + w * 7 * DAY).toLocaleDateString('en-GB', { timeZone: 'UTC', month: 'short' }) : ''));
+      if (show) lastLabel = w;
+      lastMonth = m;
+    }
+    const dayNames = ['Mon', '', 'Wed', '', 'Fri', '', 'Sun'];
+    let visits = 0;
+    for (let dow = 0; dow < 7; dow++) {
+      grid.append(h('span', { class: 'cal-dow' }, dayNames[dow]));
+      for (let w = 0; w < WEEKS; w++) {
+        const iso = fromTime(firstMonday + (w * 7 + dow) * DAY);
+        if (iso > today) { grid.append(h('span')); continue; }
+        const day = byDay.get(iso);
+        if (day) visits++;
+        const desc = !day ? 'no visit' : day.games ? `${day.games} game${day.games === 1 ? '' : 's'}, ${day.wins} won` : 'visit, no scores logged';
+        grid.append(h('span', { class: `cal-cell l${level(day)}`, 'data-tip': `${fmtDay(iso)}|${desc}`, 'aria-label': `${fmtDay(iso)}: ${desc}`, role: 'img' }));
+      }
+    }
+    grid.addEventListener('pointermove', (e) => {
+      const tip = e.target.dataset?.tip;
+      if (!tip) { hideTooltip(); return; }
+      const [title, desc] = tip.split('|');
+      showTooltip(title, [{ value: desc }], e.clientX, e.clientY);
+    });
+    grid.addEventListener('pointerleave', hideTooltip);
+
+    const scroller = h('div', { class: 'cal-scroll' }, grid);
+    setTimeout(() => { scroller.scrollLeft = scroller.scrollWidth; }, 0);
+    return h('section', { class: 'card' },
+      h('div', { class: 'card-head' }, h('h2', null, 'Activity'),
+        h('span', { class: 'muted small' }, `${visits} visit${visits === 1 ? '' : 's'} in the last year · best streak ${st.weekStreak.best} week${st.weekStreak.best === 1 ? '' : 's'}`)),
+      scroller,
+      h('div', { class: 'cal-legend', 'aria-hidden': 'true' }, 'Less',
+        [0, 1, 2, 3, 4].map((l) => h('span', { class: `cal-cell l${l}` })), 'More',
+        h('span', { class: 'muted' }, ' · lightest = visit without scores, darker = more games')));
+  }
+
   function tile(label, value, delta) {
     return h('div', { class: 'tile' }, h('div', { class: 'label' }, label), h('div', { class: 'value' }, value), delta ? h('div', { class: 'delta' }, delta) : null);
+  }
+
+  // ----- Monthly recap
+
+  const monthOf = (iso) => iso.slice(0, 7);
+  const monthName = (ym) => fmtDate(ym + '-01', { day: undefined, month: 'long', year: 'numeric' });
+
+  function recapData(ym) {
+    const d = state.d;
+    const from = ym + '-01';
+    const toD = new Date(toTime(from));
+    toD.setUTCMonth(toD.getUTCMonth() + 1);
+    const to = fromTime(toD.getTime()); // exclusive
+    const prevEnd = fromTime(toTime(from) - DAY);
+    const sessions = d.sessions.filter((x) => x.played_on >= from && x.played_on < to);
+    const games = sessions.flatMap((x) => d.gamesBySession.get(x.id) || []);
+    const points = games.reduce((n, g) => n + g.score_a + g.score_b, 0);
+
+    const rows = d.players.map((p) => {
+      const st = d.stats.get(p.id);
+      const visits = sessions.filter((x) => d.attBySession.get(x.id)?.has(p.id)).length;
+      const mine = st.recent.filter((g) => g.date >= from && g.date < to);
+      const wins = mine.filter((g) => g.won).length;
+      const endRating = valueAt(st.history, fromTime(toTime(to) - DAY));
+      const startRating = valueAt(st.history, prevEnd);
+      const change = mine.length && endRating ? endRating.y - (startRating ? startRating.y : ELO_START) : null;
+      return { p, visits, games: mine.length, wins, pf: mine.reduce((n, g) => n + g.pf, 0), change, mine };
+    }).filter((r) => r.visits || r.games);
+
+    const top = (score, min = 1) => {
+      const best = Math.max(...rows.map(score));
+      if (!(best >= min)) return null;
+      return { ids: rows.filter((r) => score(r) === best).map((r) => r.p.id), value: best };
+    };
+    let upset = null;
+    for (const r of rows) {
+      for (const g of r.mine) {
+        if (g.won && g.chance < 0.4 && (!upset || g.chance < upset.g.chance)) upset = { who: r.p.id, g };
+      }
+    }
+    const marathon = games.reduce((m, g) => (!m || g.score_a + g.score_b > m.score_a + m.score_b ? g : m), null);
+    const breakEvenRows = breakEven(d, 0).map((r) => {
+      const inMonth = r.points.filter((pt, i) => i > 0 && pt.x >= from && pt.x < to);
+      const before = valueAt(r.points, fromTime(toTime(from) - DAY));
+      return { r, added: inMonth.length ? inMonth[inMonth.length - 1].y - (before ? before.y : 0) : 0, total: (valueAt(r.points, fromTime(toTime(to) - DAY)) || { y: 0 }).y };
+    });
+    const newMilestones = d.players.flatMap((p) => milestones(d, p.id).done
+      .filter((m) => m.date >= from && m.date < to)
+      .map((m) => ({ ...m, who: p.id })))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    return {
+      ym, sessions, games, points, rows,
+      regular: top((r) => r.visits),
+      winner: top((r) => r.wins),
+      sharp: top((r) => (r.games >= 5 ? r.wins / r.games : -1), 0.0001),
+      climber: top((r) => (r.change == null ? -Infinity : Math.round(r.change)), 1),
+      upset, marathon: marathon && marathon.score_a + marathon.score_b > 22 ? marathon : null,
+      breakEvenRows, newMilestones,
+    };
+  }
+
+  function recapText(rc) {
+    const names = (ids) => ids.map(nameOf).join(' & ');
+    const lines = [`🎾 ${CFG.title} – ${monthName(rc.ym)}`,
+      `${rc.sessions.length} session${rc.sessions.length === 1 ? '' : 's'} · ${rc.games.length} games · ${rc.points.toLocaleString('en-GB')} points`, ''];
+    if (rc.regular) lines.push(`🏟️ Most visits: ${names(rc.regular.ids)} (${rc.regular.value})`);
+    if (rc.winner) lines.push(`🏆 Most wins: ${names(rc.winner.ids)} (${rc.winner.value})`);
+    if (rc.climber) lines.push(`📈 Biggest climber: ${names(rc.climber.ids)} (+${rc.climber.value})`);
+    if (rc.upset) lines.push(`😱 Upset: ${nameOf(rc.upset.who)} beat ${nameOf(rc.upset.g.oppId)} ${rc.upset.g.sf}–${rc.upset.g.so} (${Math.round(rc.upset.g.chance * 100)}% chance)`);
+    if (rc.marathon) lines.push(`🏃 Marathon: ${nameOf(rc.marathon.player_a)} ${gameScore(rc.marathon)} ${nameOf(rc.marathon.player_b)}`);
+    if (rc.breakEvenRows.length) {
+      lines.push('', `💶 Break-even (${fmtEuro(CFG.subscriptionPrice)})`);
+      for (const b of rc.breakEvenRows) lines.push(`${b.r.player.name}: ${fmtEuro(b.total)}${b.added ? ` (+${fmtEuro(b.added)})` : ''}${b.total >= CFG.subscriptionPrice ? ' ✅' : ''}`);
+    }
+    if (rc.newMilestones.length) {
+      lines.push('', '🔓 New milestones');
+      for (const m of rc.newMilestones.slice(0, 8)) lines.push(`${nameOf(m.who)}: ${m.label}`);
+      if (rc.newMilestones.length > 8) lines.push(`…and ${rc.newMilestones.length - 8} more`);
+    }
+    lines.push('', location.origin + location.pathname + '#recap/' + rc.ym);
+    return lines.join('\n');
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      const ta = h('textarea', { style: 'position:fixed;opacity:0' });
+      ta.value = text;
+      document.body.append(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    }
+  }
+
+  function viewRecap(arg) {
+    const d = state.d;
+    const months = [...new Set([...d.sessions.map((x) => monthOf(x.played_on)), monthOf(todayIso())])].sort();
+    const ym = arg && /^\d{4}-\d{2}$/.test(arg) ? arg : (d.sessions.length ? monthOf(d.sessions[d.sessions.length - 1].played_on) : monthOf(todayIso()));
+    const idx = months.indexOf(ym);
+    const rc = recapData(ym);
+    const frag = h('div');
+    frag.append(h('div', { class: 'view-head' },
+      h('h1', null, `Recap · ${monthName(ym)}`),
+      h('div', { class: 'actions' },
+        idx > 0 ? h('a', { class: 'btn btn-small', href: '#recap/' + months[idx - 1] }, '← ' + fmtDate(months[idx - 1] + '-01', { day: undefined, year: undefined, month: 'short' })) : null,
+        idx >= 0 && idx < months.length - 1 ? h('a', { class: 'btn btn-small', href: '#recap/' + months[idx + 1] }, fmtDate(months[idx + 1] + '-01', { day: undefined, year: undefined, month: 'short' }) + ' →') : null)));
+
+    if (!rc.sessions.length) {
+      frag.append(h('p', { class: 'empty' }, `No sessions logged in ${monthName(ym)} yet.`));
+      return frag;
+    }
+
+    frag.append(h('div', { class: 'tiles' },
+      tile('Sessions', rc.sessions.length, ''),
+      tile('Games', rc.games.length, ''),
+      tile('Points played', rc.points.toLocaleString('en-GB'), ''),
+      tile('Players', rc.rows.length, `${rc.rows.reduce((n, r) => n + r.visits, 0)} visits in total`)));
+
+    const awards = [];
+    const named = (top) => (top.ids.length === 1 ? { who: top.ids[0] } : { title: top.ids.map(nameOf).join(' & ') });
+    if (rc.regular) awards.push({ icon: '🏟️', label: 'Most visits', ...named(rc.regular), value: `${rc.regular.value} visit${rc.regular.value === 1 ? '' : 's'}` });
+    if (rc.winner) awards.push({ icon: '🏆', label: 'Most wins', ...named(rc.winner), value: `${rc.winner.value} game${rc.winner.value === 1 ? '' : 's'} won` });
+    if (rc.sharp) awards.push({ icon: '🎯', label: 'Best win rate', ...named(rc.sharp), value: fmtPct(rc.sharp.value), detail: 'At least 5 games' });
+    if (rc.climber) awards.push({ icon: '📈', label: 'Biggest climber', ...named(rc.climber), value: `+${rc.climber.value} rating` });
+    if (rc.upset) awards.push({ icon: '😱', label: 'Upset of the month', who: rc.upset.who, value: `beat ${nameOf(rc.upset.g.oppId)} ${rc.upset.g.sf}–${rc.upset.g.so}`, detail: `Had a ${Math.round(rc.upset.g.chance * 100)}% chance · ${fmtDate(rc.upset.g.date, { year: undefined })}` });
+    if (rc.marathon) awards.push({ icon: '🏃', label: 'Marathon game', title: `${nameOf(rc.marathon.player_a)} ${gameScore(rc.marathon)} ${nameOf(rc.marathon.player_b)}`, value: `${rc.marathon.score_a + rc.marathon.score_b} points played` });
+    if (awards.length) {
+      frag.append(h('section', { class: 'card' }, h('h2', null, 'Highlights'), h('div', { class: 'awards', style: 'margin-top:12px' }, awards.map(awardEl))));
+    }
+
+    frag.append(h('section', { class: 'card' },
+      h('h2', null, 'Everyone this month'),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'data' },
+        h('thead', null, h('tr', null, h('th', null, 'Player'), h('th', { class: 'num' }, 'Visits'), h('th', { class: 'num' }, 'Games'), h('th', { class: 'num' }, 'W–L'), h('th', { class: 'num' }, 'Pts/game'), h('th', { class: 'num' }, 'Rating'))),
+        h('tbody', null, rc.rows.slice().sort((a, b) => b.visits - a.visits || b.games - a.games).map((r) => h('tr', null,
+          h('td', null, h('span', { class: 'player-cell' }, dotFor(r.p.id), r.p.name)),
+          h('td', { class: 'num' }, r.visits),
+          h('td', { class: 'num' }, r.games || '–'),
+          h('td', { class: 'num' }, r.games ? `${r.wins}–${r.games - r.wins}` : '–'),
+          h('td', { class: 'num' }, r.games ? fmt1(r.pf / r.games) : '–'),
+          h('td', { class: 'num ' + (r.change > 0.5 ? 'delta-up' : r.change < -0.5 ? 'delta-down' : 'muted') }, r.change == null ? '–' : fmtSigned(r.change)))))))));
+
+    if (rc.breakEvenRows.length) {
+      frag.append(h('section', { class: 'card' },
+        h('h2', null, 'Break-even progress'),
+        h('p', { class: 'sub' }, 'Added this month, and the total in each subscriber\'s current year at the end of the month.'),
+        h('div', { class: 'meters' }, rc.breakEvenRows.map((b) => h('div', { class: 'meter' + (b.total >= CFG.subscriptionPrice ? ' done' : '') },
+          h('div', { class: 'meter-top' },
+            h('span', { class: 'meter-name' }, dotFor(b.r.player.id), b.r.player.name, h('span', { class: 'muted small', style: 'font-weight:400' }, b.added ? `+${fmtEuro(b.added)} this month` : 'nothing added this month')),
+            h('span', { class: 'meter-amount' }, h('strong', null, fmtEuro(b.total)), h('span', { class: 'muted' }, ` of ${fmtEuro(CFG.subscriptionPrice)}`))),
+          h('div', { class: 'meter-track', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': CFG.subscriptionPrice, 'aria-valuenow': Math.round(b.total), 'aria-label': `${b.r.player.name}: ${fmtEuro(b.total)} of ${fmtEuro(CFG.subscriptionPrice)}` },
+            h('div', { class: 'meter-fill', style: `width:${Math.min(100, (b.total / CFG.subscriptionPrice) * 100).toFixed(1)}%` })))))));
+    }
+
+    if (rc.newMilestones.length) {
+      frag.append(h('section', { class: 'card' },
+        h('h2', null, 'New milestones'),
+        h('div', { class: 'badges', style: 'margin-top:12px' }, rc.newMilestones.map((m) => h('div', { class: 'badge' },
+          h('span', { class: 'ms-icon', 'aria-hidden': 'true' }, m.icon),
+          h('div', null, h('div', { class: 'badge-label' }, h('span', { class: 'player-cell' }, dotFor(m.who), h('strong', null, nameOf(m.who)))), h('div', null, m.label), h('div', { class: 'muted small' }, fmtDate(m.date, { year: undefined }))))))));
+    }
+
+    const text = recapText(rc);
+    const preview = h('textarea', { class: 'share-text', readonly: true, rows: Math.min(18, text.split('\n').length + 1), 'aria-label': 'Recap text' });
+    preview.value = text;
+    frag.append(h('section', { class: 'card' },
+      h('h2', null, 'Share with the group'),
+      h('p', { class: 'sub' }, 'Copy this and paste it into your WhatsApp group.'),
+      h('div', { class: 'actions', style: 'margin-bottom:12px' },
+        h('button', { class: 'btn btn-primary', onclick: async () => toast((await copyText(text)) ? 'Copied. Paste it in WhatsApp.' : 'Could not copy; select the text below instead.') }, 'Copy for WhatsApp'),
+        navigator.share ? h('button', { class: 'btn', onclick: () => navigator.share({ text }).catch(() => {}) }, 'Share…') : null),
+      preview));
+    return frag;
   }
 
   // ----- History
@@ -1360,6 +1786,27 @@
     return frag;
   }
 
+  function gameScore(g) {
+    return `${g.score_a}–${g.score_b}`;
+  }
+
+  // "(+4)" after the name of a player who started with a head start.
+  function startTag(n) {
+    return n ? h('span', { class: 'start-tag', title: `Started at ${n}–0` }, `+${n}`) : null;
+  }
+
+  function startEdit(sess) {
+    const d = state.d;
+    if (state.draft.games.length && !state.draft.editId && !confirm('The Log form has games that are not saved yet. Replace them with this session?')) return;
+    state.draft = {
+      editId: sess.id, date: sess.played_on, slot: sess.slot, note: sess.note || '',
+      playerIds: [...(d.attBySession.get(sess.id) || [])],
+      games: (d.gamesBySession.get(sess.id) || []).map((g) => ({ a: g.player_a, b: g.player_b, sa: g.score_a, sb: g.score_b, ha: g.start_a || 0, hb: g.start_b || 0 })),
+    };
+    saveDraft();
+    location.hash = '#log';
+  }
+
   function sessionCard(sess) {
     const d = state.d;
     const games = d.gamesBySession.get(sess.id) || [];
@@ -1370,33 +1817,16 @@
         h('h3', null, fmtDay(sess.played_on)),
         h('span', { class: 'pill' }, SLOTS[sess.slot].label),
         h('span', { class: 'muted small' }, `${fmtEuro(CFG.slotValues[sess.slot] || 0)} per subscriber`),
-        edit ? h('button', {
-          class: 'btn btn-small btn-ghost',
-          onclick: () => {
-            if (!confirm(`Delete the whole session on ${fmtDay(sess.played_on)}, including ${games.length} game(s)?`)) return;
-            act(() => api.deleteSession(state.code, sess.id), 'Session deleted');
-          },
-        }, 'Delete session') : null),
+        edit ? h('button', { class: 'btn btn-small', onclick: () => startEdit(sess) }, 'Edit') : null),
       sess.note ? h('p', { class: 'muted small', style: 'margin:6px 0 0' }, sess.note) : null,
-      h('div', { class: 'people' }, att.map((pid) => h('span', { class: 'person' }, dotFor(pid), nameOf(pid),
-        edit ? h('button', {
-          class: 'btn-icon', 'aria-label': `Remove ${nameOf(pid)} from this session`, title: 'Remove',
-          onclick: () => act(() => api.removeAttendance(state.code, sess.id, pid), 'Removed'),
-        }, '×') : null))),
+      h('div', { class: 'people' }, att.map((pid) => h('span', { class: 'person' }, dotFor(pid), nameOf(pid)))),
       games.length ? h('ul', { class: 'game-list' }, games.map((g) => {
         const aWin = g.score_a > g.score_b;
         return h('li', null,
-          h('span', { class: 'side' + (aWin ? ' win' : ''), style: 'justify-content:flex-end' }, h('span', null, nameOf(g.player_a)), dotFor(g.player_a)),
-          h('span', { class: 'score' }, `${g.score_a}–${g.score_b}`),
-          h('span', { class: 'side right' + (aWin ? '' : ' win') }, dotFor(g.player_b), h('span', null, nameOf(g.player_b))),
-          edit ? h('button', {
-            class: 'btn-icon', 'aria-label': 'Delete this game', title: 'Delete game',
-            onclick: () => {
-              if (!confirm(`Delete ${nameOf(g.player_a)} ${g.score_a}–${g.score_b} ${nameOf(g.player_b)}?`)) return;
-              act(() => api.deleteGame(state.code, g.id), 'Game deleted');
-            },
-          }, '×') : null);
-      })) : h('p', { class: 'muted small', style: 'margin:0' }, 'No games logged.'));
+          h('span', { class: 'side' + (aWin ? ' win' : ''), style: 'justify-content:flex-end' }, startTag(g.start_a), h('span', null, nameOf(g.player_a)), dotFor(g.player_a)),
+          h('span', { class: 'score' }, gameScore(g)),
+          h('span', { class: 'side right' + (aWin ? '' : ' win') }, dotFor(g.player_b), h('span', null, nameOf(g.player_b)), startTag(g.start_b)));
+      })) : h('p', { class: 'muted small', style: 'margin:0' }, 'No scores logged.'));
   }
 
   // ----- Log
@@ -1441,22 +1871,38 @@
       err, form);
   }
 
+  // Suggested head start for a game between a and b, from the current ratings.
+  function suggestHandicap(a, b) {
+    const A = state.d.stats.get(a);
+    const B = state.d.stats.get(b);
+    if (!A || !B) return null;
+    const pts = Math.min(MAX_HANDICAP, Math.round(Math.abs(A.rating - B.rating) / HANDICAP_RATING));
+    return { pts, who: A.rating < B.rating ? a : b, settling: A.games < PROVISIONAL_GAMES || B.games < PROVISIONAL_GAMES };
+  }
+
   function sessionForm() {
     const d = state.d;
     const dr = state.draft;
-    const active = d.players.filter((p) => p.active !== false);
+    const editing = dr.editId ? d.sessions.find((x) => x.id === dr.editId) : null;
+    if (dr.editId && !editing) {
+      state.draft = freshDraft();
+      saveDraft();
+      return sessionForm();
+    }
+    const active = d.players.filter((p) => p.active !== false || dr.playerIds.includes(p.id) || dr.games.some((g) => g.a === p.id || g.b === p.id));
     const err = h('p', { class: 'form-error', hidden: true });
 
     if (!active.length) {
       return h('section', { class: 'card' }, h('h2', null, 'Log a session'), h('p', { class: 'empty' }, 'Add players below first.'));
     }
 
-    const existing = d.sessions.find((x) => x.played_on === dr.date && x.slot === dr.slot);
+    const clash = d.sessions.find((x) => x.played_on === dr.date && x.slot === dr.slot && x.id !== dr.editId);
     const update = (fn) => { fn(); saveDraft(); render(); };
+    const leaveEdit = (hash) => { state.draft = freshDraft(); saveDraft(); location.hash = hash; render(); };
 
     const dateInput = h('input', {
       type: 'date', id: 'f-date', value: dr.date, max: todayIso(), required: true,
-      onchange: (e) => update(() => { dr.date = e.target.value || todayIso(); dr.slot = guessSlot(dr.date); }),
+      onchange: (e) => update(() => { dr.date = e.target.value || todayIso(); if (!dr.editId) dr.slot = guessSlot(dr.date); }),
     });
 
     const slotChoices = h('div', { class: 'choices', role: 'radiogroup', 'aria-label': 'Time slot' },
@@ -1465,7 +1911,7 @@
         h('span', null, h('span', { class: 'choice-label' }, sl.label), h('small', null, `${sl.hint} · ${fmtEuro(CFG.slotValues[key])}`)))));
 
     const inGames = new Set(dr.games.flatMap((g) => [g.a, g.b]).filter(Boolean));
-    const peopleChoices = h('div', { class: 'choices' }, active.map((p) => h('label', { class: 'choice' },
+    const peopleChoices = h('div', { class: 'choices' }, active.map((p) => h('label', { class: 'choice', title: inGames.has(p.id) ? 'Plays in a game below' : null },
       h('input', {
         type: 'checkbox', checked: dr.playerIds.includes(p.id) || inGames.has(p.id), disabled: inGames.has(p.id),
         onchange: (e) => update(() => {
@@ -1480,6 +1926,31 @@
       h('option', { value: '' }, 'Player…'),
       options.map((p) => h('option', { value: p.id, selected: p.id === value }, p.name)));
 
+    const handicapLine = (g, i) => {
+      if (!g.a || !g.b || g.a === g.b) return null;
+      const sug = suggestHandicap(g.a, g.b);
+      const key = (g.ha || 0) > 0 ? 'ha' : (g.hb || 0) > 0 ? 'hb' : null;
+      if (key) {
+        const who = key === 'ha' ? g.a : g.b;
+        return h('div', { class: 'hc-line' },
+          h('span', null, 'Head start: ', h('strong', null, nameOf(who)), ' starts at'),
+          h('input', {
+            type: 'number', inputmode: 'numeric', min: 1, max: 10, value: g[key], 'aria-label': `Game ${i + 1}, head start`,
+            oninput: (e) => { g[key] = Math.max(0, Math.min(10, Number(e.target.value) || 0)); saveDraft(); },
+          }),
+          h('span', null, '–0'),
+          sug && sug.who === who && sug.pts !== g[key] ? h('span', { class: 'muted' }, `(suggested ${sug.pts})`) : null,
+          h('button', { type: 'button', class: 'btn btn-small btn-ghost', onclick: () => update(() => { g.ha = 0; g.hb = 0; }) }, 'Remove'));
+      }
+      if (!sug || !sug.pts) return h('div', { class: 'hc-line muted' }, 'Even match by rating: no head start needed.');
+      return h('div', { class: 'hc-line' },
+        h('span', null, 'Suggested: ', h('strong', null, nameOf(sug.who)), ` starts at ${sug.pts}–0`, sug.settling ? h('span', { class: 'muted' }, ' (ratings still settling)') : null),
+        h('button', {
+          type: 'button', class: 'btn btn-small',
+          onclick: () => update(() => { g.ha = sug.who === g.a ? sug.pts : 0; g.hb = sug.who === g.b ? sug.pts : 0; }),
+        }, 'Use'));
+    };
+
     const rows = h('div', { class: 'game-rows' }, dr.games.map((g, i) => {
       const scoreInput = (key, cls, labelText) => h('input', {
         type: 'number', inputmode: 'numeric', min: 0, max: 99, class: cls, 'aria-label': labelText, placeholder: '0',
@@ -1487,28 +1958,30 @@
         oninput: (e) => { g[key] = e.target.value === '' ? null : Number(e.target.value); saveDraft(); },
       });
       return h('div', { class: 'game-row' },
-        playerSelect(g.a, (e) => update(() => { g.a = e.target.value || null; }), 'pa', `Game ${i + 1}, first player`),
+        playerSelect(g.a, (e) => update(() => { g.a = e.target.value || null; g.ha = 0; g.hb = 0; }), 'pa', `Game ${i + 1}, first player`),
         scoreInput('sa', 'sa', `Game ${i + 1}, first player's score`),
         h('span', { class: 'vs' }, '–'),
         scoreInput('sb', 'sb', `Game ${i + 1}, second player's score`),
-        playerSelect(g.b, (e) => update(() => { g.b = e.target.value || null; }), 'pb', `Game ${i + 1}, second player`),
-        h('button', { type: 'button', class: 'btn-icon del', 'aria-label': `Remove game ${i + 1}`, onclick: () => update(() => { dr.games.splice(i, 1); }) }, '×'));
+        playerSelect(g.b, (e) => update(() => { g.b = e.target.value || null; g.ha = 0; g.hb = 0; }), 'pb', `Game ${i + 1}, second player`),
+        h('button', { type: 'button', class: 'btn-icon del', 'aria-label': `Remove game ${i + 1}`, onclick: () => update(() => { dr.games.splice(i, 1); }) }, '×'),
+        handicapLine(g, i));
     }));
 
     const addGame = () => update(() => {
       const prev = dr.games[dr.games.length - 1];
       const ids = [...here];
-      dr.games.push({ a: prev ? prev.a : ids[0] || null, b: prev ? prev.b : ids[1] || null, sa: null, sb: null });
+      dr.games.push({ a: prev ? prev.a : ids[0] || null, b: prev ? prev.b : ids[1] || null, sa: null, sb: null, ha: prev ? prev.ha || 0 : 0, hb: prev ? prev.hb || 0 : 0 });
     });
 
     const note = h('input', { type: 'text', maxlength: 200, value: dr.note || '', placeholder: 'Optional', oninput: (e) => { dr.note = e.target.value; saveDraft(); } });
 
-    const saveBtn = h('button', { type: 'submit', class: 'btn btn-primary' }, existing ? 'Add to this session' : dr.games.length ? 'Save session' : 'Save visit');
+    const saveBtn = h('button', { type: 'submit', class: 'btn btn-primary' },
+      editing ? 'Save changes' : clash ? 'Add to this session' : dr.games.length ? 'Save session' : 'Save visit');
 
     const form = h('form', {
       onsubmit: async (e) => {
         e.preventDefault();
-        const problem = validateDraft(dr);
+        const problem = validateDraft(dr) || (editing && clash ? 'Another session already exists on this date and time slot. Pick a different one, or delete one of the two.' : null);
         if (problem) {
           err.textContent = problem;
           err.hidden = false;
@@ -1517,11 +1990,17 @@
         }
         saveBtn.disabled = true;
         const payload = {
-          date: dr.date, slot: dr.slot, note: (dr.note || '').trim(),
+          id: dr.editId, date: dr.date, slot: dr.slot, note: (dr.note || '').trim(),
           playerIds: [...new Set([...dr.playerIds, ...dr.games.flatMap((g) => [g.a, g.b])])],
-          games: dr.games.map((g) => ({ a: g.a, b: g.b, sa: g.sa, sb: g.sb })),
+          games: dr.games.map((g) => ({ a: g.a, b: g.b, sa: g.sa, sb: g.sb, ha: g.ha || 0, hb: g.hb || 0 })),
         };
         const n = payload.games.length;
+        if (editing) {
+          const ok = await act(() => api.updateSession(state.code, payload), 'Session updated');
+          if (ok) leaveEdit('#history');
+          else saveBtn.disabled = false;
+          return;
+        }
         const ok = await act(() => api.logSession(state.code, payload), n ? `Saved ${n} game${n === 1 ? '' : 's'}` : 'Visit saved');
         if (ok) {
           // Keep date, slot and who's there so the next batch of games is quick to add.
@@ -1535,18 +2014,36 @@
     },
     h('div', { class: 'field' }, h('label', { for: 'f-date' }, 'Date'), dateInput),
     h('div', { class: 'field' }, h('span', { class: 'label' }, 'Time slot'), slotChoices),
-    existing ? h('p', { class: 'notice' }, `There is already a session on this date and slot (${(d.gamesBySession.get(existing.id) || []).length} games). Saving adds to it, so the visit isn't counted twice.`) : null,
+    clash && !editing ? h('p', { class: 'notice' },
+      `There is already a session on this date and slot (${(d.gamesBySession.get(clash.id) || []).length} games). Saving adds to it, so the visit isn't counted twice. `,
+      h('a', { href: '#log', onclick: (e) => { e.preventDefault(); startEdit(clash); render(); } }, 'Edit that session instead')) : null,
+    clash && editing ? h('p', { class: 'notice form-error' }, 'Another session already exists on this date and time slot.') : null,
     h('div', { class: 'field' }, h('span', { class: 'label' }, 'Who was there? ', h('span', { class: 'hint' }, 'Counts towards break-even for subscribers.')), peopleChoices),
     h('div', { class: 'field' },
-      h('span', { class: 'label' }, 'Games ', h('span', { class: 'hint' }, 'Optional. One row per game, e.g. 11–7. Don\'t remember the scores? Just save the visit.')),
+      h('span', { class: 'label' }, 'Games ', h('span', { class: 'hint' }, 'Optional. One row per game with the final score, e.g. 11–7. Don\'t remember the scores? Just save the visit.')),
       rows,
       h('div', null, h('button', { type: 'button', class: 'btn', onclick: addGame }, dr.games.length ? '+ Another game' : '+ Add a game'))),
     h('div', { class: 'field' }, h('label', null, 'Note'), note),
     err,
-    h('div', { class: 'actions' }, saveBtn,
-      h('button', { type: 'button', class: 'btn btn-ghost', onclick: () => { if (confirm('Clear this form?')) update(() => { state.draft = freshDraft(); }); } }, 'Clear')));
+    editing
+      ? h('div', { class: 'actions' }, saveBtn,
+        h('button', { type: 'button', class: 'btn btn-ghost', onclick: () => leaveEdit('#history') }, 'Cancel'),
+        h('button', {
+          type: 'button', class: 'btn btn-ghost btn-danger', style: 'margin-left:auto',
+          onclick: async () => {
+            if (!confirm(`Delete the whole session on ${fmtDay(editing.played_on)}, including its games?`)) return;
+            if (await act(() => api.deleteSession(state.code, editing.id), 'Session deleted')) leaveEdit('#history');
+          },
+        }, 'Delete session'))
+      : h('div', { class: 'actions' }, saveBtn,
+        h('button', { type: 'button', class: 'btn btn-ghost', onclick: () => { if (confirm('Clear this form?')) update(() => { state.draft = freshDraft(); }); } }, 'Clear')));
 
-    return h('section', { class: 'card' }, h('h2', null, 'Log a session'), h('p', { class: 'sub' }, 'Log the visit and any games. You can come back and add more games to the same session later.'), form);
+    return h('section', { class: 'card' + (editing ? ' editing' : '') },
+      h('h2', null, editing ? `Edit session · ${fmtDay(editing.played_on)}` : 'Log a session'),
+      h('p', { class: 'sub' }, editing
+        ? 'Change the date, who was there or any game, then save. Saving replaces this session\'s attendance and games.'
+        : 'Log the visit and any games. To change a session later, use Edit on the History page.'),
+      form);
   }
 
   function validateDraft(dr) {
@@ -1561,6 +2058,7 @@
       if (!Number.isInteger(g.sa) || !Number.isInteger(g.sb)) return n + 'fill in both scores.';
       if (g.sa < 0 || g.sb < 0 || g.sa > 99 || g.sb > 99) return n + 'scores must be between 0 and 99.';
       if (g.sa === g.sb) return n + 'a game cannot end in a draw.';
+      if ((g.ha || 0) > g.sa || (g.hb || 0) > g.sb) return n + 'a final score can\'t be lower than the head start.';
     }
     return null;
   }
