@@ -5,7 +5,7 @@ The squash tracker of Squash Team Eindhoven, a group of friends who met at Solar
 A single static page that tracks:
 
 - **Subscription break-even:** for each subscriber, how much their visits this season would have cost without a subscription, measured against €315.
-- **Leaderboard:** a rating for every player, plus wins, win %, points per game and week streaks.
+- **Leaderboard:** a rating for every player (with a ± margin), plus wins, win %, points per game and week streaks.
 - **Records & bragging rights:** longest week streak, regular of the month, hot hand, biggest upset, fiercest rivalry, marathon game and more.
 - **Progress:** each player's points per game and rating over time, a GitHub-style activity calendar, milestones with what's next, and their record against each opponent.
 - **Head-to-head heatmap:** who usually beats whom, at a glance.
@@ -78,7 +78,7 @@ If you set up the database before a change that needs one, run the matching file
 - **Log a visit:** on the **+ Log** page, pick the date and slot, tick who was there and add each game, for example 9–11. Logging the same date and slot again adds to that session, so a visit is never counted twice.
 - **Share a session:** after saving, or from any session in **History**, press **Share on WhatsApp** to open WhatsApp with a summary filled in (games, wins, rating changes, streaks, new milestones, break-even and a link back), then pick the group. **Copy summary** puts the same text on the clipboard.
 - **Fix a mistake:** with the group code entered, press **Edit** on a session in **History**. You can change the date, slot, who was there and every game, or delete the session.
-- **Head starts:** when you pick two players for a game, the form suggests a head start if their ratings differ. Press **Use** to apply it, and enter the final scoreboard (head start included).
+- **Head starts:** when you pick two players for a game, the form suggests a head start. Press **Use**, or **Other head start** to record the one you actually played. Always enter who had it, what they started on, and the final score with the head start included (started at 4–0 and won 11–9 → enter 11–9 with a 4–0 head start). Leaving the head start out skews the ratings.
 - **Change the group code:** run this in the Supabase SQL Editor:
 
   ```sql
@@ -97,13 +97,13 @@ If you set up the database before a change that needs one, run the matching file
 
 For people without a subscription, the dashboard shows what their visits over the last 12 months cost, and how much more it would take for a subscription to pay off.
 
-**Rating.** Everyone starts at 1000. After each game, rating points move from one player to the other depending on how the result compares with what the ratings predicted (Elo, K = 32). A game's result is half the win and half your share of the points. So losing 9–11 to a much stronger player can still raise your rating, and getting better shows up before you start winning.
+**Rating.** The leaderboard rating is the prediction model's strength for each player (see Predictions below) on a familiar scale: everyone starts at 1000, and 100 points higher means winning about 64% of rallies, roughly 90% of games. It counts rallies actually won, so taking points off a stronger player shows up before the wins do, and head-start games count fairly. The "±" is the 90% margin. The model is refitted after every session on the games up to that session, which gives the rating history and the "Last" change. Recent games count more, so a rating drifts slowly back towards 1000 when someone stops playing.
 
 **Week streak.** The number of weeks in a row (Monday to Sunday) with at least one visit. A streak isn't broken until a whole week passes without a visit, so on Monday it's "on the line" and the leaderboard reminds everyone to play before Sunday.
 
-**Records.** The upset is the win the ratings rated least likely at the time (under 40%). Nemesis and favourite opponent on a player's page need at least 3 games against that person.
+**Records.** The upset is the win the model rated least likely beforehand (under 40%), using only the games before that session. Nemesis and favourite opponent on a player's page need at least 3 games against that person.
 
-**Head starts.** The suggested head start is the one that makes a game closest to 50/50. The prediction model estimates the weaker player's chance of winning a rally, works out exactly how likely they are to win the game when starting at 0–0, 1–0, … 9–0, and picks the start nearest 50%. The Predict tab shows this table for any matchup. With few games the estimate is rough; it settles as you play. Games played with a head start count fairly: the head-start points are left out of the rallies won. (The leaderboard rating separately treats one point of head start as 40 rating points when scoring such a game.)
+**Head starts.** The suggested head start is the one that makes a game closest to 50/50. The prediction model estimates the weaker player's chance of winning a rally, works out exactly how likely they are to win the game when starting at 0–0, 1–0, … 9–0, and picks the start nearest 50%. The Predict tab shows this table for any matchup. With few games the estimate is rough; it settles as you play. Games played with a head start count fairly: the head-start points are left out of the rallies won.
 
 ## Backups
 

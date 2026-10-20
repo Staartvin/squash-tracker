@@ -625,3 +625,9 @@ ol.steps { margin: 0 0 12px; padding-left: 20px; font-size: 14px; color: var(--i
 ol.steps li { margin: 4px 0; }
 table.hc-table { max-width: 420px; }
 table.hc-table tr.chosen td { background: color-mix(in srgb, var(--accent) 28%, transparent); font-weight: 600; color: var(--ink); }
+
+.pm { font-size: 11px; color: var(--muted); font-weight: 400; }
+
+.hc-line select { width: auto; min-height: 30px; padding: 2px 6px; font-size: 13px; }
+.hc-reminder { flex-basis: 100%; font-size: 12px; color: var(--ink-2); }
+.notice.score-rule { margin: 0 0 10px; }

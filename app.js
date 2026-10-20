@@ -24,16 +24,12 @@
     fri_offpeak: { label: 'Friday off-peak', hint: 'Subscribers only', order: 2 },
   };
 
-  // Rating: Elo where a game's result blends the win (50%) with the share of
-  // points scored (50%). Close losses still count, so improving shows up
-  // before the wins do.
-  const ELO_START = 1000;
-  const ELO_K = 32;
+  // Rating: the prediction model's strength (see "Predictions" below) on a
+  // familiar scale. Everyone starts at 1000; RATING_SCALE makes a 400-point
+  // gap mean 10x better odds of winning a rally.
+  const RATING_START = 1000;
+  const RATING_SCALE = 400 / Math.LN10;
   const PROVISIONAL_GAMES = 5;
-  // For the leaderboard rating only: a head start of one point counts as this
-  // many rating points when working out the expected result of a game.
-  // (Suggested head starts come from the prediction model instead.)
-  const HANDICAP_RATING = 40;
   // Largest head start the site suggests (the database allows up to 10).
   const MAX_HANDICAP = 9;
   const SERIES_SLOTS = 8;
@@ -119,7 +115,7 @@
   }
   const fmtPct = (x) => (x == null ? '–' : Math.round(x * 100) + '%');
   const fmt1 = (x) => (x == null ? '–' : x.toFixed(1));
-  const fmtSigned = (x) => (x > 0 ? '+' : x < 0 ? '−' : '±') + Math.abs(Math.round(x));
+  const fmtSigned = (x) => { const r = Math.round(x); return (r > 0 ? '+' : r < 0 ? '−' : '±') + Math.abs(r); };
 
   function guessSlot(iso) {
     const wd = weekday(iso);
@@ -414,34 +410,35 @@
     for (const a of raw.attendance) attBySession.get(a.session_id)?.add(a.player_id);
 
     const stats = new Map(players.map((p) => [p.id, {
-      rating: ELO_START, games: 0, wins: 0, pf: 0, pa: 0, lastDelta: null,
+      rating: RATING_START, ratingPm: null, games: 0, wins: 0, pf: 0, pa: 0, lastDelta: null,
       history: [], perSession: [], opp: new Map(), recent: [],
     }]));
 
+    // Ratings come from the prediction model, refitted after every session on
+    // the games up to that session. Each game's win chance comes from the fit
+    // before its session, so it is what the site would have predicted then.
+    const base = { players, sessions, gamesBySession };
+    const predictions = [];
+    let prevFit = null;
     let upset = null;
     let marathon = null;
     for (const sess of sessions) {
-      const before = new Map();
       const tally = new Map();
-      for (const g of gamesBySession.get(sess.id) || []) {
+      const sessGames = gamesBySession.get(sess.id) || [];
+      const informed = prevFit && prevFit.games >= 10;
+      for (const g of sessGames) {
         const A = stats.get(g.player_a);
         const B = stats.get(g.player_b);
         if (!A || !B) continue;
-        if (!before.has(g.player_a)) before.set(g.player_a, A.rating);
-        if (!before.has(g.player_b)) before.set(g.player_b, B.rating);
-        // A head start counts as extra rating for the expectation, so winning
-        // with a head start earns less than winning level.
         const ha = g.start_a || 0;
         const hb = g.start_b || 0;
-        const rA0 = A.rating;
-        const rB0 = B.rating;
-        const expected = 1 / (1 + Math.pow(10, (rB0 - rA0 - HANDICAP_RATING * (ha - hb)) / 400));
-        const share = g.score_a / (g.score_a + g.score_b);
-        const actual = 0.5 * (g.score_a > g.score_b ? 1 : 0) + 0.5 * share;
-        const delta = ELO_K * (actual - expected);
+        const expected = prevFit ? predict(prevFit, g.player_a, g.player_b, ha, hb).mid.game : 0.5;
+        const rA0 = ratingOf(prevFit, g.player_a);
+        const rB0 = ratingOf(prevFit, g.player_b);
         const aWon = g.score_a > g.score_b;
+        if (informed) predictions.push({ p: expected, won: aWon ? 1 : 0 });
         const winnerChance = aWon ? expected : 1 - expected;
-        if (winnerChance < 0.4 && (!upset || winnerChance < upset.chance)) {
+        if (informed && winnerChance < 0.4 && (!upset || winnerChance < upset.chance)) {
           upset = {
             chance: winnerChance, date: sess.played_on,
             winner: aWon ? g.player_a : g.player_b, loser: aWon ? g.player_b : g.player_a,
@@ -449,17 +446,21 @@
           };
         }
         if (!marathon || g.score_a + g.score_b > marathon.g.score_a + marathon.g.score_b) marathon = { g, date: sess.played_on };
-        A.rating += delta;
-        B.rating -= delta;
-        record(A, g.player_a, g.player_b, { won: aWon, pf: g.score_a - ha, pa: g.score_b - hb, sf: g.score_a, so: g.score_b, hf: ha, ho: hb, chance: expected, ownRating: rA0, oppRating: rB0 });
-        record(B, g.player_b, g.player_a, { won: !aWon, pf: g.score_b - hb, pa: g.score_a - ha, sf: g.score_b, so: g.score_a, hf: hb, ho: ha, chance: 1 - expected, ownRating: rB0, oppRating: rA0 });
+        const chance = informed ? expected : null;
+        record(A, g.player_a, g.player_b, { won: aWon, pf: g.score_a - ha, pa: g.score_b - hb, sf: g.score_a, so: g.score_b, hf: ha, ho: hb, chance, ownRating: rA0, oppRating: rB0 });
+        record(B, g.player_b, g.player_a, { won: !aWon, pf: g.score_b - hb, pa: g.score_a - ha, sf: g.score_b, so: g.score_a, hf: hb, ho: ha, chance: chance == null ? null : 1 - chance, ownRating: rB0, oppRating: rA0 });
       }
-      for (const [pid, r0] of before) {
-        const P = stats.get(pid);
-        P.lastDelta = P.rating - r0;
-        P.history.push({ x: sess.played_on, y: P.rating, session: sess.id });
-        const t = tally.get(pid);
-        P.perSession.push({ x: sess.played_on, y: t.pf / t.games, games: t.games, wins: t.wins, pf: t.pf, pa: t.pa });
+      if (sessGames.length) {
+        const fit = fitRallyModel(base, fromTime(toTime(sess.played_on) + DAY), sess.played_on);
+        for (const pid of tally.keys()) {
+          const P = stats.get(pid);
+          const after = ratingOf(fit, pid);
+          P.lastDelta = after - ratingOf(prevFit, pid);
+          P.history.push({ x: sess.played_on, y: after, session: sess.id });
+          const t = tally.get(pid);
+          P.perSession.push({ x: sess.played_on, y: t.pf / t.games, games: t.games, wins: t.wins, pf: t.pf, pa: t.pa });
+        }
+        prevFit = fit;
       }
 
       // pf/pa are points actually won in rallies (head start excluded);
@@ -487,6 +488,14 @@
       }
     }
 
+    // Current ratings: the model on all games, older games weighing less as time passes.
+    const model = fitRallyModel(base);
+    for (const p of players) {
+      const st = stats.get(p.id);
+      st.rating = ratingOf(model, p.id);
+      st.ratingPm = ratingMargin(model, p.id);
+    }
+
     const ranked = players
       .filter((p) => stats.get(p.id).games > 0)
       .sort((a, b) => stats.get(b.id).rating - stats.get(a.id).rating);
@@ -504,7 +513,7 @@
       st.winStreak = winStreak(st.recent);
     }
 
-    return { players, pById, sessions, games, gamesBySession, attBySession, stats, ranked, rankOf, upset, marathon, weeksBy };
+    return { players, pById, sessions, games, gamesBySession, attBySession, stats, ranked, rankOf, upset, marathon, weeksBy, model, predictions };
   }
 
   function visitValue(d, playerId, from, to) {
@@ -1094,7 +1103,8 @@
         return h('tr', { class: 'clickable', tabindex: 0, onclick: () => { location.hash = '#players/' + encodeURIComponent(p.id); }, onkeydown: (e) => { if (e.key === 'Enter') location.hash = '#players/' + encodeURIComponent(p.id); } },
           h('td', { class: 'rank num' }, i + 1),
           h('td', null, h('span', { class: 'player-cell' }, dotFor(p.id), p.name, st.games < PROVISIONAL_GAMES ? h('span', { class: 'tag', title: `Fewer than ${PROVISIONAL_GAMES} games` }, 'new') : null)),
-          h('td', { class: 'num' }, h('strong', null, Math.round(st.rating))),
+          h('td', { class: 'num', title: st.ratingPm ? `90% interval: ${Math.round(st.rating - st.ratingPm)}–${Math.round(st.rating + st.ratingPm)}` : null },
+            h('strong', null, Math.round(st.rating)), st.ratingPm ? h('span', { class: 'pm' }, ` ±${Math.round(st.ratingPm)}`) : null),
           h('td', { class: 'num ' + (delta > 0.5 ? 'delta-up' : delta < -0.5 ? 'delta-down' : 'muted') }, delta == null ? '–' : (delta > 0.5 ? '▲ ' : delta < -0.5 ? '▼ ' : '') + fmtSigned(delta)),
           h('td', { class: 'num' }, st.games),
           h('td', { class: 'num' }, `${st.wins}–${st.games - st.wins}`),
@@ -1106,9 +1116,12 @@
     if (streakNote) card.append(streakNote);
     card.append(h('details', { class: 'explain' },
       h('summary', null, 'How the rating works'),
-      h('p', null, `Everyone starts at ${ELO_START}. After each game, points move from one player to the other based on how the result compares with what the ratings predicted. Beating a higher-rated player earns more than beating a lower-rated one.`),
-      h('p', null, 'The result of a game is half the win and half the share of points you scored. So losing 9–11 to someone much stronger can still raise your rating, and improving shows up before the wins do.'),
-      h('p', null, `"Last" is the change in your most recent session. Players marked "new" have fewer than ${PROVISIONAL_GAMES} games, so their rating is still settling.`),
+      h('p', null, `The rating is the strength the prediction model gives you, on a familiar scale. Everyone starts at ${RATING_START}. It's based on rallies actually won, not just wins and losses, so taking 7 points off someone much stronger shows up straight away, before the wins do.`),
+      h('p', null, (() => {
+        const p100 = sigmoid(100 / RATING_SCALE);
+        return `What the numbers mean: 100 points higher means winning about ${pct(p100)} of rallies, which is about ${pct(gameWinProb(p100))} of games. Head-start points never count as rallies won, so games with a head start count fairly.`;
+      })()),
+      h('p', null, `Recent games count more (a game from ${HALF_LIFE_DAYS} days ago counts half), so ratings follow you as you improve, and drift slowly back towards ${RATING_START} if you stop playing. "±" is the 90% margin: it shrinks as you play more. "Last" is the change at your most recent session. Players marked "new" have fewer than ${PROVISIONAL_GAMES} games.`),
       h('p', null, '"Streak" counts weeks in a row (Monday to Sunday) with at least one visit. This week only breaks it once Sunday has passed without a visit.')));
     return card;
   }
@@ -1162,7 +1175,7 @@
       const hist = d.stats.get(p.id).history;
       if (!hist.length || hist[hist.length - 1].x < monthAgo) return -Infinity;
       const before = valueAt(hist, fromTime(toTime(monthAgo) - DAY));
-      return d.stats.get(p.id).rating - (before ? before.y : ELO_START);
+      return d.stats.get(p.id).rating - (before ? before.y : RATING_START);
     };
     const climber = best(d.ranked, climb);
     if (climber && climb(climber) >= 1) {
@@ -1337,7 +1350,7 @@
     const trend = st.perSession.length >= 6 ? avg(last) - avg(first) : null;
 
     frag.append(h('div', { class: 'tiles' },
-      tile('Rating', Math.round(st.rating), d.rankOf.has(pid) ? `#${d.rankOf.get(pid)} of ${d.ranked.length}` : ''),
+      tile('Rating', Math.round(st.rating), [d.rankOf.has(pid) ? `#${d.rankOf.get(pid)} of ${d.ranked.length}` : '', st.ratingPm ? `±${Math.round(st.ratingPm)}` : ''].filter(Boolean).join(' · ')),
       tile('Games', st.games, `${st.wins} won, ${st.games - st.wins} lost`),
       tile('Win rate', fmtPct(st.wins / st.games), ''),
       tile('Points per game', fmt1(st.pf / st.games),
@@ -1431,7 +1444,7 @@
     const firstWhere = (fn) => st.recent.find(fn);
     const special = [
       ['💪', 'Took 9+ points off a much stronger player', (g) => !g.won && g.pf >= 9 && g.oppRating - g.ownRating >= 100],
-      ['😱', 'Giant killer: won with under a 30% chance', (g) => g.won && g.chance < 0.3],
+      ['😱', 'Giant killer: won with under a 30% chance', (g) => g.won && g.chance != null && g.chance < 0.3],
       ['🥯', 'Served a bagel (won 11–0)', (g) => g.won && g.so === 0],
       ['🏃', 'Marathon game (26+ points)', (g) => g.sf + g.so >= 26],
     ];
@@ -1466,7 +1479,7 @@
 
     // Climbing from your lowest rating: rewards improving, wherever you start.
     const climbTargets = [50, 100, 200];
-    let low = ELO_START;
+    let low = RATING_START;
     let ci = 0;
     let bestClimb = 0;
     for (const pt of st.history) {
@@ -1698,8 +1711,20 @@
   }
 
   function getModel() {
-    if (!state.d.model) state.d.model = fitRallyModel(state.d);
     return state.d.model;
+  }
+
+  // A player's strength on the rating scale (1000 before any games).
+  function ratingOf(model, pid) {
+    if (!model || !model.idx.has(pid)) return RATING_START;
+    return RATING_START + RATING_SCALE * model.theta[model.idx.get(pid)];
+  }
+
+  // Half-width of the 90% interval of a rating.
+  function ratingMargin(model, pid) {
+    if (!model || !model.idx.has(pid)) return null;
+    const i = model.idx.get(pid);
+    return Z90 * RATING_SCALE * Math.sqrt(model.cov[i][i]);
   }
 
   // Chance that the player on rally-win probability p wins a game to `to`
@@ -1763,19 +1788,9 @@
     return `11–${Math.round(loser)}`;
   }
 
-  // Predict every game from the games logged before its session, and compare.
+  // How the predictions made before each session did against the results.
   function backtest(d) {
-    const rows = [];
-    for (const sess of d.sessions) {
-      const games = d.gamesBySession.get(sess.id) || [];
-      if (!games.length) continue;
-      const model = fitRallyModel(d, sess.played_on, sess.played_on);
-      if (model.games < 10) continue;
-      for (const g of games) {
-        const pr = predict(model, g.player_a, g.player_b, g.start_a || 0, g.start_b || 0).mid.game;
-        rows.push({ p: pr, won: g.score_a > g.score_b ? 1 : 0 });
-      }
-    }
+    const rows = d.predictions;
     if (rows.length < 15) return null;
     const brier = rows.reduce((s2, r) => s2 + (r.p - r.won) ** 2, 0) / rows.length;
     const favWon = rows.filter((r) => (r.p >= 0.5) === (r.won === 1)).length / rows.length;
@@ -1925,7 +1940,7 @@
       h('p', null, 'Every player gets a strength. The difference in strength gives the chance of winning a single rally. Because every rally counts as evidence, a game to 11 says much more than just who won it.'),
       h('p', null, `The strengths are estimated with a Bayesian model: recent games count more (a game from ${HALF_LIFE_DAYS} days ago counts half), head starts are taken out of the points, and a prior keeps estimates sensible for players with few games. Rallies aren't fully independent, so each one counts as half an observation. The model also knows how uncertain each strength is, and the percentages average over that uncertainty.`),
       h('p', null, 'From the rally chance, the exact chance of winning a game to 11 (win by two, from any head start) and a best-of-5 match is calculated. The 90% interval means: given the games so far, the true chance lies in this range with 90% probability.'),
-      h('p', null, 'The leaderboard rating is a separate, simpler system that updates game by game; these predictions refit everything from all logged games at once.')));
+      h('p', null, 'The leaderboard rating is this same strength on a familiar scale, so the leaderboard, these predictions and the suggested head starts always agree.')));
     return frag;
   }
 
@@ -1952,7 +1967,7 @@
       const wins = mine.filter((g) => g.won).length;
       const endRating = valueAt(st.history, fromTime(toTime(to) - DAY));
       const startRating = valueAt(st.history, prevEnd);
-      const change = mine.length && endRating ? endRating.y - (startRating ? startRating.y : ELO_START) : null;
+      const change = mine.length && endRating ? endRating.y - (startRating ? startRating.y : RATING_START) : null;
       return { p, visits, games: mine.length, wins, pf: mine.reduce((n, g) => n + g.pf, 0), change, mine };
     }).filter((r) => r.visits || r.games);
 
@@ -1964,7 +1979,7 @@
     let upset = null;
     for (const r of rows) {
       for (const g of r.mine) {
-        if (g.won && g.chance < 0.4 && (!upset || g.chance < upset.g.chance)) upset = { who: r.p.id, g };
+        if (g.won && g.chance != null && g.chance < 0.4 && (!upset || g.chance < upset.g.chance)) upset = { who: r.p.id, g };
       }
     }
     const marathon = games.reduce((m, g) => (!m || g.score_a + g.score_b > m.score_a + m.score_b ? g : m), null);
@@ -2287,7 +2302,7 @@
         const hist = d.stats.get(pid).history;
         const i = hist.findIndex((pt) => pt.session === sess.id);
         if (i < 0) return null;
-        const delta = hist[i].y - (i > 0 ? hist[i - 1].y : ELO_START);
+        const delta = hist[i].y - (i > 0 ? hist[i - 1].y : RATING_START);
         return `${nameOf(pid)} ${Math.round(hist[i].y)} (${fmtSigned(delta)})`;
       }).filter(Boolean);
       if (ratings.length) lines.push('📈 ' + ratings.join(' · '));
@@ -2471,30 +2486,40 @@
     const handicapLine = (g, i) => {
       if (!g.a || !g.b || g.a === g.b) return null;
       const sug = suggestHandicap(g.a, g.b);
+      const set = (who, pts) => { g.ha = who === g.a ? pts : 0; g.hb = who === g.b ? pts : 0; };
       const key = (g.ha || 0) > 0 ? 'ha' : (g.hb || 0) > 0 ? 'hb' : null;
       if (key) {
         const who = key === 'ha' ? g.a : g.b;
         return h('div', { class: 'hc-line' },
-          h('span', null, 'Head start: ', h('strong', null, nameOf(who)), ' starts at'),
+          h('span', null, 'Head start:'),
+          h('select', {
+            'aria-label': `Game ${i + 1}, who had the head start`,
+            onchange: (e) => update(() => set(e.target.value, g[key])),
+          }, [g.a, g.b].map((pid) => h('option', { value: pid, selected: pid === who }, nameOf(pid)))),
+          h('span', null, 'started at'),
           h('input', {
             type: 'number', inputmode: 'numeric', min: 1, max: 10, value: g[key], 'aria-label': `Game ${i + 1}, head start`,
             oninput: (e) => { g[key] = Math.max(0, Math.min(10, Number(e.target.value) || 0)); saveDraft(); },
             onchange: () => render(),
           }),
           h('span', null, '–0'),
-          sug && sug.who === who && sug.pts !== g[key] ? h('span', { class: 'muted' }, `(suggested ${sug.pts})`) : null,
+          sug && sug.pts && sug.who === who && sug.pts !== g[key] ? h('span', { class: 'muted' }, `(suggested ${sug.pts})`) : null,
           h('button', { type: 'button', class: 'btn btn-small btn-ghost', onclick: () => update(() => { g.ha = 0; g.hb = 0; }) }, 'Remove'),
-          winChanceNote(g.a, g.b, g.ha || 0, g.hb || 0, 'with this head start, '));
+          winChanceNote(g.a, g.b, g.ha || 0, g.hb || 0, 'with this head start, '),
+          h('span', { class: 'hc-reminder' }, `Enter the final score, head start included: ${nameOf(who)} starting at ${g[key]}–0 and winning 11–9 is entered as 11–9.`));
       }
-      if (!sug || !sug.pts) return h('div', { class: 'hc-line muted' }, 'Close match: no head start needed.', winChanceNote(g.a, g.b, 0, 0), h('a', { href: '#predict/headstart', class: 'small' }, 'How?'));
-      const chance = winChanceNote(g.a, g.b, 0, 0, 'without one, ');
+      const other = h('button', {
+        type: 'button', class: 'btn btn-small btn-ghost',
+        onclick: () => update(() => set(sug && sug.pts ? sug.who : g.b, sug && sug.pts ? sug.pts : 1)),
+      }, sug && sug.pts ? 'Other head start' : 'Played with a head start');
+      if (!sug || !sug.pts) {
+        return h('div', { class: 'hc-line muted' }, 'Close match: no head start needed.', winChanceNote(g.a, g.b, 0, 0), other, h('a', { href: '#predict/headstart', class: 'small' }, 'How?'));
+      }
       return h('div', { class: 'hc-line' },
         h('span', null, 'Suggested: ', h('strong', null, nameOf(sug.who)), ` starts at ${sug.pts}–0`, sug.settling ? h('span', { class: 'muted' }, ' (few games yet, so rough)') : null),
-        h('button', {
-          type: 'button', class: 'btn btn-small',
-          onclick: () => update(() => { g.ha = sug.who === g.a ? sug.pts : 0; g.hb = sug.who === g.b ? sug.pts : 0; }),
-        }, 'Use'),
-        chance,
+        h('button', { type: 'button', class: 'btn btn-small', onclick: () => update(() => set(sug.who, sug.pts)) }, 'Use'),
+        other,
+        winChanceNote(g.a, g.b, 0, 0, 'without one, '),
         h('a', { href: '#predict/headstart', class: 'small' }, 'How?'));
     };
 
@@ -2569,7 +2594,8 @@
     clash && editing ? h('p', { class: 'notice form-error' }, 'Another session already exists on this date and time slot.') : null,
     h('div', { class: 'field' }, h('span', { class: 'label' }, 'Who was there? ', h('span', { class: 'hint' }, 'Counts towards break-even for subscribers.')), peopleChoices),
     h('div', { class: 'field' },
-      h('span', { class: 'label' }, 'Games ', h('span', { class: 'hint' }, 'Optional. One row per game with the final score, e.g. 11–7. Don\'t remember the scores? Just save the visit.')),
+      h('span', { class: 'label' }, 'Games ', h('span', { class: 'hint' }, 'Optional. Don\'t remember the scores? Just save the visit.')),
+      h('p', { class: 'notice score-rule' }, h('strong', null, 'One row per game. '), 'Played with a head start? Record who had it and what they started on, and enter the final score with the head start included. For example: started at 4–0 and won 11–9 → enter 11–9 with a 4–0 head start. The site takes the head start off again, so only rallies actually won count. Leaving the head start out, or entering only the points won after it, skews the ratings.'),
       rows,
       h('div', null, h('button', { type: 'button', class: 'btn', onclick: addGame }, dr.games.length ? '+ Another game' : '+ Add a game'))),
     h('div', { class: 'field' }, h('label', null, 'Note'), note),
