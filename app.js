@@ -889,7 +889,7 @@
 
   function route() {
     const [view, arg] = (location.hash.replace(/^#/, '') || 'dashboard').split('/');
-    return { view: ['dashboard', 'players', 'recap', 'history', 'log'].includes(view) ? view : 'dashboard', arg: arg ? decodeURIComponent(arg) : null };
+    return { view: ['dashboard', 'players', 'predict', 'recap', 'history', 'log'].includes(view) ? view : 'dashboard', arg: arg ? decodeURIComponent(arg) : null };
   }
 
   function render() {
@@ -913,7 +913,7 @@
       return;
     }
     const scrollY = window.scrollY;
-    const views = { dashboard: viewDashboard, players: () => viewPlayers(arg), recap: () => viewRecap(arg), history: viewHistory, log: viewLog };
+    const views = { dashboard: viewDashboard, players: () => viewPlayers(arg), predict: viewPredict, recap: () => viewRecap(arg), history: viewHistory, log: viewLog };
     app.replaceChildren(views[view]());
     if (view === 'log') window.scrollTo(0, scrollY);
     if (view === 'history' && arg && state.focusedSession !== arg) {
@@ -1591,6 +1591,312 @@
     return h('div', { class: 'tile' }, h('div', { class: 'label' }, label), h('div', { class: 'value' }, value), delta ? h('div', { class: 'delta' }, delta) : null);
   }
 
+  // ----- Predictions
+  //
+  // A Bayesian rally model: each player has a strength θ, and the chance that
+  // A wins a rally against B is σ(θA − θB). Every rally played is evidence, so
+  // a game to 11 gives ~20 data points instead of 1. Older games count less
+  // (half weight after HALF_LIFE_DAYS), so improvement shows up. A normal prior
+  // keeps strengths sensible for players with few games. The posterior is
+  // approximated as normal (Laplace), which gives each matchup an uncertainty.
+  // Rally odds are then turned into game odds (to 11, win by two, head starts
+  // included) and best-of-5 match odds.
+
+  const HALF_LIFE_DAYS = 180;
+  const PRIOR_SD = 1;
+  // Rallies aren't fully independent (serve, momentum, fatigue), so each one
+  // counts as half an observation. Backtests on simulated seasons showed full
+  // weight made the predictions overconfident.
+  const RALLY_WEIGHT = 0.5;
+  const Z90 = 1.645;
+  const sigmoid = (x) => 1 / (1 + Math.exp(-x));
+
+  function cholesky(A) {
+    const n = A.length;
+    const L = A.map(() => new Array(n).fill(0));
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j <= i; j++) {
+        let sum = A[i][j];
+        for (let k = 0; k < j; k++) sum -= L[i][k] * L[j][k];
+        L[i][j] = i === j ? Math.sqrt(Math.max(sum, 1e-12)) : sum / L[j][j];
+      }
+    }
+    return L;
+  }
+
+  function cholSolve(L, b) {
+    const n = L.length;
+    const y = new Array(n);
+    for (let i = 0; i < n; i++) {
+      let sum = b[i];
+      for (let k = 0; k < i; k++) sum -= L[i][k] * y[k];
+      y[i] = sum / L[i][i];
+    }
+    const x = new Array(n);
+    for (let i = n - 1; i >= 0; i--) {
+      let sum = y[i];
+      for (let k = i + 1; k < n; k++) sum -= L[k][i] * x[k];
+      x[i] = sum / L[i][i];
+    }
+    return x;
+  }
+
+  // Fits strengths on games before `until` (all games if null), weighting by age relative to `ref`.
+  function fitRallyModel(d, until = null, ref = todayIso()) {
+    const ids = d.players.map((p) => p.id);
+    const idx = new Map(ids.map((id, i) => [id, i]));
+    const n = ids.length;
+    const data = [];
+    const pairGames = new Map();
+    for (const sess of d.sessions) {
+      if (until && sess.played_on >= until) break;
+      const age = Math.max(0, (toTime(ref) - toTime(sess.played_on)) / DAY);
+      const w = RALLY_WEIGHT * Math.pow(0.5, age / HALF_LIFE_DAYS);
+      for (const g of d.gamesBySession.get(sess.id) || []) {
+        const wa = g.score_a - (g.start_a || 0);
+        const wb = g.score_b - (g.start_b || 0);
+        if (wa + wb <= 0 || !idx.has(g.player_a) || !idx.has(g.player_b)) continue;
+        data.push({ i: idx.get(g.player_a), j: idx.get(g.player_b), wa, wb, w });
+        const key = [g.player_a, g.player_b].sort().join('|');
+        pairGames.set(key, (pairGames.get(key) || 0) + 1);
+      }
+    }
+    const precision = 1 / (PRIOR_SD * PRIOR_SD);
+    let theta = new Array(n).fill(0);
+    let H = null;
+    for (let it = 0; it < 50; it++) {
+      const grad = theta.map((t) => -t * precision);
+      H = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (__, j) => (i === j ? precision : 0)));
+      for (const r of data) {
+        const p = sigmoid(theta[r.i] - theta[r.j]);
+        const total = r.wa + r.wb;
+        const gr = r.w * (r.wa - total * p);
+        grad[r.i] += gr;
+        grad[r.j] -= gr;
+        const hh = r.w * total * p * (1 - p);
+        H[r.i][r.i] += hh;
+        H[r.j][r.j] += hh;
+        H[r.i][r.j] -= hh;
+        H[r.j][r.i] -= hh;
+      }
+      const step = cholSolve(cholesky(H), grad);
+      theta = theta.map((t, k) => t + step[k]);
+      if (Math.max(0, ...step.map(Math.abs)) < 1e-9) break;
+    }
+    // Posterior covariance = inverse Hessian at the optimum.
+    const L = cholesky(H);
+    const cov = ids.map((_, k) => cholSolve(L, ids.map((__, m) => (m === k ? 1 : 0))));
+    return { idx, theta, cov, games: data.length, pairGames };
+  }
+
+  function getModel() {
+    if (!state.d.model) state.d.model = fitRallyModel(state.d);
+    return state.d.model;
+  }
+
+  // Chance that the player on rally-win probability p wins a game to `to`
+  // (win by two), starting from ha–hb.
+  function gameWinProb(p, ha = 0, hb = 0, to = 11) {
+    const deuce = (p * p) / (p * p + (1 - p) * (1 - p));
+    const memo = new Map();
+    const f = (a, b) => {
+      if (a >= to && a - b >= 2) return 1;
+      if (b >= to && b - a >= 2) return 0;
+      if (a >= to - 1 && b >= to - 1) return a === b ? deuce : a > b ? p + (1 - p) * deuce : p * deuce;
+      const key = a * 100 + b;
+      if (!memo.has(key)) memo.set(key, p * f(a + 1, b) + (1 - p) * f(a, b + 1));
+      return memo.get(key);
+    };
+    return f(ha, hb);
+  }
+
+  // Chance of winning a best-of-5 (first to 3 games) with game-win probability q.
+  const matchWinProb = (q) => q ** 3 * (1 + 3 * (1 - q) + 6 * (1 - q) ** 2);
+
+  // Prediction for a game between a and b, with a 90% interval.
+  // θa − θb is normal under the posterior, and every probability below is
+  // monotone in it, so the interval ends map straight through.
+  function predict(model, a, b, ha = 0, hb = 0) {
+    const i = model.idx.get(a);
+    const j = model.idx.get(b);
+    const mu = model.theta[i] - model.theta[j];
+    const sd = Math.sqrt(Math.max(1e-12, model.cov[i][i] + model.cov[j][j] - 2 * model.cov[i][j]));
+    const at = (x) => {
+      const p = sigmoid(x);
+      const game = gameWinProb(p, ha, hb);
+      return { rally: p, game, match: matchWinProb(game) };
+    };
+    // Point estimate: averaged over the uncertainty in θa − θb (41-point
+    // quadrature), which pulls uncertain matchups towards 50%.
+    const mid = { rally: 0, game: 0, match: 0 };
+    let wsum = 0;
+    for (let k = -20; k <= 20; k++) {
+      const z = k * 0.2;
+      const w = Math.exp(-z * z / 2);
+      const v = at(mu + z * sd);
+      mid.rally += w * v.rally;
+      mid.game += w * v.game;
+      mid.match += w * v.match;
+      wsum += w;
+    }
+    mid.rally /= wsum;
+    mid.game /= wsum;
+    mid.match /= wsum;
+    const lo = at(mu - Z90 * sd);
+    const hi = at(mu + Z90 * sd);
+    const pair = model.pairGames.get([a, b].sort().join('|')) || 0;
+    return { mid, lo, hi, pair };
+  }
+
+  // Typical score of a game: the winner reaches 11, the loser's points follow from the rally odds.
+  function typicalScore(p) {
+    const fav = Math.max(p, 1 - p);
+    const loser = Math.min(9.5, (11 * (1 - fav)) / fav);
+    return `11–${Math.round(loser)}`;
+  }
+
+  // Predict every game from the games logged before its session, and compare.
+  function backtest(d) {
+    const rows = [];
+    for (const sess of d.sessions) {
+      const games = d.gamesBySession.get(sess.id) || [];
+      if (!games.length) continue;
+      const model = fitRallyModel(d, sess.played_on, sess.played_on);
+      if (model.games < 10) continue;
+      for (const g of games) {
+        const pr = predict(model, g.player_a, g.player_b, g.start_a || 0, g.start_b || 0).mid.game;
+        rows.push({ p: pr, won: g.score_a > g.score_b ? 1 : 0 });
+      }
+    }
+    if (rows.length < 15) return null;
+    const brier = rows.reduce((s2, r) => s2 + (r.p - r.won) ** 2, 0) / rows.length;
+    const favWon = rows.filter((r) => (r.p >= 0.5) === (r.won === 1)).length / rows.length;
+    const buckets = [[0.5, 0.6], [0.6, 0.7], [0.7, 0.8], [0.8, 0.9], [0.9, 1.01]].map(([from, to]) => {
+      const inB = rows.map((r) => (r.p >= 0.5 ? r : { p: 1 - r.p, won: 1 - r.won })).filter((r) => r.p >= from && r.p < to);
+      return { from, to, n: inB.length, said: inB.reduce((s2, r) => s2 + r.p, 0) / (inB.length || 1), won: inB.reduce((s2, r) => s2 + r.won, 0) / (inB.length || 1) };
+    }).filter((b) => b.n > 0);
+    return { n: rows.length, brier, favWon, buckets };
+  }
+
+  const pct = (x) => `${Math.round(x * 100)}%`;
+
+  function rangeBar(lo, mid, hi, label) {
+    return h('div', { class: 'range', role: 'img', 'aria-label': label },
+      h('div', { class: 'range-track' },
+        h('div', { class: 'range-mid-line' }),
+        h('div', { class: 'range-band', style: `left:${(lo * 100).toFixed(1)}%;width:${((hi - lo) * 100).toFixed(1)}%` }),
+        h('div', { class: 'range-dot', style: `left:${(mid * 100).toFixed(1)}%` })),
+      h('div', { class: 'range-axis', 'aria-hidden': 'true' }, h('span', null, '0%'), h('span', null, '50%'), h('span', null, '100%')));
+  }
+
+  function viewPredict() {
+    const d = state.d;
+    const frag = h('div');
+    frag.append(h('div', { class: 'view-head' }, h('h1', null, 'Predictions')));
+    const withGames = d.ranked;
+    if (withGames.length < 2) {
+      frag.append(h('p', { class: 'empty' }, 'Log some games between at least two players to get predictions.'));
+      return frag;
+    }
+    const model = getModel();
+    const pr = state.predict || (state.predict = { a: withGames[0].id, b: withGames[withGames.length - 1].id, hc: 'none', custom: 3 });
+    if (!d.pById.has(pr.a)) pr.a = withGames[0].id;
+    if (!d.pById.has(pr.b) || pr.b === pr.a) pr.b = withGames.find((p) => p.id !== pr.a).id;
+
+    const sug = suggestHandicap(pr.a, pr.b);
+    let ha = 0;
+    let hb = 0;
+    const weaker = sug ? sug.who : pr.b;
+    const startFor = pr.hc === 'suggested' ? (sug ? sug.pts : 0) : pr.hc === 'custom' ? pr.custom : 0;
+    if (weaker === pr.a) ha = startFor; else hb = startFor;
+    const res = predict(model, pr.a, pr.b, ha, hb);
+    const A = nameOf(pr.a);
+    const B = nameOf(pr.b);
+
+    const pick = (key) => h('select', {
+      'aria-label': key === 'a' ? 'First player' : 'Second player',
+      onchange: (e) => { pr[key] = e.target.value; if (pr.a === pr.b) pr[key === 'a' ? 'b' : 'a'] = withGames.find((p) => p.id !== pr[key]).id; render(); },
+    }, d.players.map((p) => h('option', { value: p.id, selected: p.id === pr[key] }, p.name)));
+
+    const hcChoices = h('div', { class: 'choices' },
+      [['none', 'No head start'], ['suggested', sug && sug.pts ? `Suggested: ${nameOf(sug.who)} +${sug.pts}` : 'Suggested (none needed)'], ['custom', 'Custom']].map(([key, label]) => h('label', { class: 'choice' },
+        h('input', { type: 'radio', name: 'hc', checked: pr.hc === key, onchange: () => { pr.hc = key; render(); } }),
+        h('span', null, label))),
+      pr.hc === 'custom' ? h('label', { class: 'hc-custom' }, `${nameOf(weaker)} starts at `,
+        h('input', { type: 'number', min: 0, max: 10, value: pr.custom, onchange: (e) => { pr.custom = Math.max(0, Math.min(10, Number(e.target.value) || 0)); render(); } }), '–0') : null);
+
+    const stat = (title, key, note) => h('div', { class: 'pred-stat' },
+      h('div', { class: 'label' }, title),
+      h('div', { class: 'pred-value' }, pct(res.mid[key])),
+      h('div', { class: 'delta' }, `90% interval: ${pct(res.lo[key])}–${pct(res.hi[key])}`),
+      rangeBar(res.lo[key], res.mid[key], res.hi[key], `${title}: ${pct(res.mid[key])}, 90% interval ${pct(res.lo[key])} to ${pct(res.hi[key])}`),
+      note ? h('div', { class: 'delta' }, note) : null);
+
+    const fav = res.mid.game >= 0.5 ? A : B;
+    frag.append(h('section', { class: 'card' },
+      h('h2', null, 'Who wins?'),
+      h('div', { class: 'pred-pick' }, pick('a'), h('span', { class: 'muted' }, 'vs'), pick('b')),
+      h('div', { class: 'field', style: 'margin-top:12px' }, h('span', { class: 'label' }, 'Head start'), hcChoices),
+      h('p', { class: 'pred-headline' }, h('strong', null, fav), ' is the favourite.', ha || hb ? '' : ` A typical game: ${fav} ${typicalScore(res.mid.rally)}.`),
+      h('div', { class: 'pred-stats' },
+        stat(`${A} wins a game`, 'game', ha || hb ? `With ${nameOf(ha ? pr.a : pr.b)} starting at ${ha || hb}–0.` : null),
+        stat(`${A} wins a best-of-5 match`, 'match', null),
+        stat(`${A} wins a rally`, 'rally', 'The building block: everything above follows from this.')),
+      h('p', { class: 'muted small', style: 'margin:12px 0 0' },
+        `Based on ${res.pair} game${res.pair === 1 ? '' : 's'} between ${A} and ${B}, and ${model.games} games overall (everyone's results help, through common opponents). Fewer games means a wider interval.`)));
+
+    // Everyone vs everyone, no head starts.
+    frag.append(h('section', { class: 'card' },
+      h('h2', null, 'Everyone vs everyone'),
+      h('p', { class: 'sub' }, 'Chance that the row player wins a game against the column player, without head starts. Small print: the 90% interval.'),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'data h2h' },
+        h('thead', null, h('tr', null, h('th', null, ''), withGames.map((p) => h('th', { class: 'num', style: 'text-align:center' }, h('span', { class: 'player-cell' }, dotFor(p.id), p.name))))),
+        h('tbody', null, withGames.map((row) => h('tr', null,
+          h('th', { scope: 'row' }, h('span', { class: 'player-cell' }, dotFor(row.id), row.name)),
+          withGames.map((col) => {
+            if (row.id === col.id) return h('td', { class: 'cell self' }, '');
+            const r = predict(model, row.id, col.id);
+            const t = (r.mid.game - 0.5) * 2;
+            const fill = `color-mix(in srgb, var(${t >= 0 ? '--div-pos' : '--div-neg'}) ${Math.round(Math.abs(t) * 60)}%, var(--div-mid))`;
+            const label = `${row.name} beats ${col.name} in a game: ${pct(r.mid.game)} (90% interval ${pct(r.lo.game)}–${pct(r.hi.game)})`;
+            return h('td', {
+              class: 'cell num clickable-cell', style: `background:${fill}`, title: label, 'aria-label': label, tabindex: 0,
+              onclick: () => { Object.assign(pr, { a: row.id, b: col.id, hc: 'none' }); render(); window.scrollTo({ top: 0, behavior: 'smooth' }); },
+            }, h('div', null, h('strong', null, pct(r.mid.game))), h('div', { class: 'muted small' }, `${pct(r.lo.game)}–${pct(r.hi.game)}`));
+          })))))),
+      h('div', { class: 'h2h-legend', 'aria-hidden': 'true' }, 'Likely loses', h('span', { class: 'h2h-scale' }), 'Likely wins', h('span', null, '· tap a cell to see that matchup above'))));
+
+    // How good are the predictions?
+    const bt = state.d.backtest === undefined ? (state.d.backtest = backtest(d)) : state.d.backtest;
+    const btCard = h('section', { class: 'card' }, h('h2', null, 'How good are these predictions?'));
+    if (!bt) {
+      btCard.append(h('p', { class: 'empty' }, 'After a few more sessions this checks the predictions against what actually happened.'));
+    } else {
+      btCard.append(
+        h('p', { class: 'sub' }, `Each of ${bt.n} past games predicted using only the games played before it, then compared with the result.`),
+        h('div', { class: 'tiles' },
+          tile('Favourite won', pct(bt.favWon), `of ${bt.n} games`),
+          tile('Brier score', bt.brier.toFixed(3), `lower is better · a coin flip scores 0.250`)),
+        h('div', { class: 'table-wrap' }, h('table', { class: 'data' },
+          h('thead', null, h('tr', null, h('th', null, 'When the favourite had'), h('th', { class: 'num' }, 'Games'), h('th', { class: 'num' }, 'Predicted'), h('th', { class: 'num' }, 'Actually won'))),
+          h('tbody', null, bt.buckets.map((b) => h('tr', null,
+            h('td', null, `${Math.round(b.from * 100)}–${Math.min(100, Math.round(b.to * 100))}%`),
+            h('td', { class: 'num' }, b.n),
+            h('td', { class: 'num' }, pct(b.said)),
+            h('td', { class: 'num' }, pct(b.won))))))),
+        h('p', { class: 'muted small', style: 'margin:10px 0 0' }, 'Well calibrated means the last two columns are close: when it says 70%, the favourite should win about 7 in 10.'));
+    }
+    frag.append(btCard);
+
+    frag.append(h('details', { class: 'explain card' },
+      h('summary', null, 'How this works'),
+      h('p', null, 'Every player gets a strength. The difference in strength gives the chance of winning a single rally. Because every rally counts as evidence, a game to 11 says much more than just who won it.'),
+      h('p', null, `The strengths are estimated with a Bayesian model: recent games count more (a game from ${HALF_LIFE_DAYS} days ago counts half), head starts are taken out of the points, and a prior keeps estimates sensible for players with few games. Rallies aren't fully independent, so each one counts as half an observation. The model also knows how uncertain each strength is, and the percentages average over that uncertainty.`),
+      h('p', null, 'From the rally chance, the exact chance of winning a game to 11 (win by two, from any head start) and a best-of-5 match is calculated. The 90% interval means: given the games so far, the true chance lies in this range with 90% probability.'),
+      h('p', null, 'The leaderboard rating is a separate, simpler system that updates game by game; these predictions refit everything from all logged games at once.')));
+    return frag;
+  }
+
   // ----- Monthly recap
 
   const monthOf = (iso) => iso.slice(0, 7);
@@ -2055,6 +2361,15 @@
       err, form);
   }
 
+  // "Sam wins 72% of games like this" for the log form, from the prediction model.
+  function winChanceNote(a, b, ha, hb, lead = '') {
+    const model = getModel();
+    if (!model.games || !model.idx.has(a) || !model.idx.has(b)) return null;
+    const q = predict(model, a, b, ha, hb).mid.game;
+    const fav = q >= 0.5 ? a : b;
+    return h('span', { class: 'muted' }, `· ${lead}${nameOf(fav)} wins ${pct(Math.max(q, 1 - q))} of games like this`);
+  }
+
   // Suggested head start for a game between a and b, from the current ratings.
   function suggestHandicap(a, b) {
     const A = state.d.stats.get(a);
@@ -2121,18 +2436,22 @@
           h('input', {
             type: 'number', inputmode: 'numeric', min: 1, max: 10, value: g[key], 'aria-label': `Game ${i + 1}, head start`,
             oninput: (e) => { g[key] = Math.max(0, Math.min(10, Number(e.target.value) || 0)); saveDraft(); },
+            onchange: () => render(),
           }),
           h('span', null, '–0'),
           sug && sug.who === who && sug.pts !== g[key] ? h('span', { class: 'muted' }, `(suggested ${sug.pts})`) : null,
-          h('button', { type: 'button', class: 'btn btn-small btn-ghost', onclick: () => update(() => { g.ha = 0; g.hb = 0; }) }, 'Remove'));
+          h('button', { type: 'button', class: 'btn btn-small btn-ghost', onclick: () => update(() => { g.ha = 0; g.hb = 0; }) }, 'Remove'),
+          winChanceNote(g.a, g.b, g.ha || 0, g.hb || 0, 'with this head start, '));
       }
-      if (!sug || !sug.pts) return h('div', { class: 'hc-line muted' }, 'Even match by rating: no head start needed.');
+      if (!sug || !sug.pts) return h('div', { class: 'hc-line muted' }, 'Even match by rating: no head start needed.', winChanceNote(g.a, g.b, 0, 0));
+      const chance = winChanceNote(g.a, g.b, 0, 0, 'without one, ');
       return h('div', { class: 'hc-line' },
         h('span', null, 'Suggested: ', h('strong', null, nameOf(sug.who)), ` starts at ${sug.pts}–0`, sug.settling ? h('span', { class: 'muted' }, ' (ratings still settling)') : null),
         h('button', {
           type: 'button', class: 'btn btn-small',
           onclick: () => update(() => { g.ha = sug.who === g.a ? sug.pts : 0; g.hb = sug.who === g.b ? sug.pts : 0; }),
-        }, 'Use'));
+        }, 'Use'),
+        chance);
     };
 
     const rows = h('div', { class: 'game-rows' }, dr.games.map((g, i) => {

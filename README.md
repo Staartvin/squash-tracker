@@ -9,6 +9,7 @@ A single static page that tracks:
 - **Records & bragging rights:** longest week streak, regular of the month, hot hand, biggest upset, fiercest rivalry, marathon game and more.
 - **Progress:** each player's points per game and rating over time, a GitHub-style activity calendar, milestones with what's next, and their record against each opponent.
 - **Head-to-head heatmap:** who usually beats whom, at a glance.
+- **Predictions:** the chance to win a rally, a game and a best-of-5 match for any two players, with a 90% interval, plus a backtest of how good the predictions have been.
 - **Suggested head starts:** for uneven matches, e.g. "Vincent starts at 4–0", based on the ratings.
 - **Monthly recap:** highlights, break-even progress and new milestones, with a copy-for-WhatsApp button.
 - **History and input:** log a visit and its games from your phone at the club, protected by a shared group code.
@@ -110,6 +111,8 @@ The free Supabase plan has no automatic backups, so download one now and then:
 
 - **On the site:** History page → **Backup**. The CSV files (games, visits, players) open in Excel, Numbers or Google Sheets. **Full backup (JSON)** keeps every table exactly as stored, ids included, so the database can be rebuilt from it.
 - **In Supabase:** Table Editor → pick a table → **Export → CSV**.
+
+**Predictions.** A Bayesian rally model: each player has a strength, and the strength difference gives the chance of winning one rally. Every rally counts as evidence (as half an observation, since rallies aren't fully independent), games from 180 days ago count half, head-start points are left out, and a normal prior keeps players with few games sensible. The posterior is approximated as normal (Laplace), which gives each matchup an uncertainty; game odds (to 11, win by two, from any head start) and best-of-5 odds are calculated exactly from the rally odds, with 90% intervals. The backtest predicts every past game from only the games before it and shows how often the favourite won, the Brier score and a calibration table.
 
 ## Notes
 
