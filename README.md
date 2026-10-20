@@ -103,7 +103,7 @@ For people without a subscription, the dashboard shows what their visits over th
 
 **Records.** The upset is the win the ratings rated least likely at the time (under 40%). Nemesis and favourite opponent on a player's page need at least 3 games against that person.
 
-**Head starts.** One point of head start counts as about 40 rating points, so a 200-point gap suggests starting at 5–0 (at most 8). Ratings take the head start into account: winning with one earns less than winning level, and points per game only count points actually won.
+**Head starts.** The suggested head start is the one that makes a game closest to 50/50. The prediction model estimates the weaker player's chance of winning a rally, works out exactly how likely they are to win the game when starting at 0–0, 1–0, … 9–0, and picks the start nearest 50%. The Predict tab shows this table for any matchup. With few games the estimate is rough; it settles as you play. Games played with a head start count fairly: the head-start points are left out of the rallies won. (The leaderboard rating separately treats one point of head start as 40 rating points when scoring such a game.)
 
 ## Backups
 

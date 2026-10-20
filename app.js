@@ -30,10 +30,12 @@
   const ELO_START = 1000;
   const ELO_K = 32;
   const PROVISIONAL_GAMES = 5;
-  // A head start of one point is worth about this many rating points, so a
-  // 200-point gap suggests the weaker player starts at 5-0.
+  // For the leaderboard rating only: a head start of one point counts as this
+  // many rating points when working out the expected result of a game.
+  // (Suggested head starts come from the prediction model instead.)
   const HANDICAP_RATING = 40;
-  const MAX_HANDICAP = 8;
+  // Largest head start the site suggests (the database allows up to 10).
+  const MAX_HANDICAP = 9;
   const SERIES_SLOTS = 8;
 
   // ---------------------------------------------------------------------------
@@ -913,9 +915,14 @@
       return;
     }
     const scrollY = window.scrollY;
-    const views = { dashboard: viewDashboard, players: () => viewPlayers(arg), predict: viewPredict, recap: () => viewRecap(arg), history: viewHistory, log: viewLog };
+    const views = { dashboard: viewDashboard, players: () => viewPlayers(arg), predict: () => viewPredict(arg), recap: () => viewRecap(arg), history: viewHistory, log: viewLog };
     app.replaceChildren(views[view]());
     if (view === 'log') window.scrollTo(0, scrollY);
+    if (view === 'predict' && arg === 'headstart' && state.scrolledTo !== location.hash) {
+      state.scrolledTo = location.hash;
+      setTimeout(() => document.getElementById('headstart')?.scrollIntoView({ block: 'start' }), 50);
+    }
+    if (view !== 'predict') state.scrolledTo = null;
     if (view === 'history' && arg && state.focusedSession !== arg) {
       // A shared link like #history/<session id>: scroll to that session once.
       state.focusedSession = arg;
@@ -1364,6 +1371,7 @@
     const opps = [...st.opp.entries()].sort((a, b) => b[1].games - a[1].games);
     frag.append(h('section', { class: 'card' },
       h('h2', null, 'Against each opponent'),
+      h('p', { class: 'sub' }, '"Head start" is the start that would make a game against them about 50/50. ', h('a', { href: '#predict/headstart' }, 'How is it worked out?')),
       h('div', { class: 'table-wrap' }, h('table', { class: 'data' },
         h('thead', null, h('tr', null, h('th', null, 'Opponent'), h('th', { class: 'num' }, 'Games'), h('th', { class: 'num' }, 'W–L'), h('th', { class: 'num' }, 'Avg score'), h('th', { class: 'num' }, 'Last 5'), h('th', { class: 'num', title: 'Suggested head start from the current ratings' }, 'Head start'))),
         h('tbody', null, opps.map(([oid, o]) => h('tr', null,
@@ -1844,6 +1852,30 @@
         stat(`${A} wins a rally`, 'rally', 'The building block: everything above follows from this.')),
       h('p', { class: 'muted small', style: 'margin:12px 0 0' },
         `Based on ${res.pair} game${res.pair === 1 ? '' : 's'} between ${A} and ${B}, and ${model.games} games overall (everyone's results help, through common opponents). Fewer games means a wider interval.`)));
+
+    // How head starts are worked out, shown for the selected matchup.
+    if (sug) {
+      const weakName = nameOf(sug.who);
+      const strongName = nameOf(sug.who === pr.a ? pr.b : pr.a);
+      frag.append(h('section', { class: 'card', id: 'headstart' },
+        h('h2', null, 'How head starts are worked out'),
+        h('p', { class: 'sub' }, 'A head start means the weaker player begins the game ahead, for example at 4–0, and the game is still played to 11 (win by two). The suggestion is the head start that makes the game as close to 50/50 as possible.'),
+        h('ol', { class: 'steps' },
+          h('li', null, `From every logged rally, the prediction model estimates how likely ${weakName} is to win a single rally against ${strongName}: about ${pct(Math.min(res.mid.rally, 1 - res.mid.rally))} right now.`),
+          h('li', null, `From that, it calculates exactly how likely ${weakName} is to win the game when starting at 0–0, 1–0, 2–0, and so on up to ${MAX_HANDICAP}–0.`),
+          h('li', null, 'It suggests the start where that chance is closest to 50%.')),
+        h('div', { class: 'table-wrap' }, h('table', { class: 'data hc-table' },
+          h('thead', null, h('tr', null, h('th', null, `${weakName} starts at`), h('th', { class: 'num' }, `${weakName} wins the game`), h('th', null, ''))),
+          h('tbody', null, sug.chances.map((c, pts) => h('tr', { class: pts === sug.pts ? 'chosen' : null },
+            h('td', null, `${pts}–0`),
+            h('td', { class: 'num' }, pct(c)),
+            h('td', null, pts === sug.pts ? '← suggested' : '')))))),
+        h('p', { class: 'muted small', style: 'margin:10px 0 0' },
+          sug.settling
+            ? `With only a few games between these two, this is a rough estimate: the model is still unsure how big the gap is, and the suggestion averages over that uncertainty. It settles as you play more.`
+            : `It's based on all logged games, with recent ones counting more, so it follows you as you improve.`,
+          ' Games played with a head start feed back in fairly: the head-start points are left out, only rallies actually won count.')));
+    }
 
     // Everyone vs everyone, no head starts.
     frag.append(h('section', { class: 'card' },
@@ -2371,12 +2403,23 @@
   }
 
   // Suggested head start for a game between a and b, from the current ratings.
+  // The head start that makes a game closest to 50/50, according to the
+  // prediction model: for the weaker player, try starting at 0–0, 1–0, … 9–0
+  // and pick the start where their chance of winning the game is nearest 50%.
   function suggestHandicap(a, b) {
-    const A = state.d.stats.get(a);
-    const B = state.d.stats.get(b);
-    if (!A || !B) return null;
-    const pts = Math.min(MAX_HANDICAP, Math.round(Math.abs(A.rating - B.rating) / HANDICAP_RATING));
-    return { pts, who: A.rating < B.rating ? a : b, settling: A.games < PROVISIONAL_GAMES || B.games < PROVISIONAL_GAMES };
+    const d = state.d;
+    const model = getModel();
+    if (!model.games || !model.idx.has(a) || !model.idx.has(b)) return null;
+    const aLevel = predict(model, a, b).mid.game;
+    const who = aLevel < 0.5 ? a : b;
+    const chances = [];
+    for (let pts = 0; pts <= MAX_HANDICAP; pts++) {
+      chances.push(who === a ? predict(model, a, b, pts, 0).mid.game : 1 - predict(model, a, b, 0, pts).mid.game);
+    }
+    let pts = 0;
+    chances.forEach((c, i) => { if (Math.abs(c - 0.5) < Math.abs(chances[pts] - 0.5) - 1e-9) pts = i; });
+    const games = Math.min(d.stats.get(a)?.games || 0, d.stats.get(b)?.games || 0);
+    return { pts, who, chances, settling: games < PROVISIONAL_GAMES };
   }
 
   function sessionForm() {
@@ -2443,15 +2486,16 @@
           h('button', { type: 'button', class: 'btn btn-small btn-ghost', onclick: () => update(() => { g.ha = 0; g.hb = 0; }) }, 'Remove'),
           winChanceNote(g.a, g.b, g.ha || 0, g.hb || 0, 'with this head start, '));
       }
-      if (!sug || !sug.pts) return h('div', { class: 'hc-line muted' }, 'Even match by rating: no head start needed.', winChanceNote(g.a, g.b, 0, 0));
+      if (!sug || !sug.pts) return h('div', { class: 'hc-line muted' }, 'Close match: no head start needed.', winChanceNote(g.a, g.b, 0, 0), h('a', { href: '#predict/headstart', class: 'small' }, 'How?'));
       const chance = winChanceNote(g.a, g.b, 0, 0, 'without one, ');
       return h('div', { class: 'hc-line' },
-        h('span', null, 'Suggested: ', h('strong', null, nameOf(sug.who)), ` starts at ${sug.pts}–0`, sug.settling ? h('span', { class: 'muted' }, ' (ratings still settling)') : null),
+        h('span', null, 'Suggested: ', h('strong', null, nameOf(sug.who)), ` starts at ${sug.pts}–0`, sug.settling ? h('span', { class: 'muted' }, ' (few games yet, so rough)') : null),
         h('button', {
           type: 'button', class: 'btn btn-small',
           onclick: () => update(() => { g.ha = sug.who === g.a ? sug.pts : 0; g.hb = sug.who === g.b ? sug.pts : 0; }),
         }, 'Use'),
-        chance);
+        chance,
+        h('a', { href: '#predict/headstart', class: 'small' }, 'How?'));
     };
 
     const rows = h('div', { class: 'game-rows' }, dr.games.map((g, i) => {
