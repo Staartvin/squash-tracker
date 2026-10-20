@@ -98,6 +98,13 @@ For people without a subscription, the dashboard shows what their visits over th
 
 **Head starts.** One point of head start counts as about 40 rating points, so a 200-point gap suggests starting at 5–0 (at most 8). Ratings take the head start into account: winning with one earns less than winning level, and points per game only count points actually won.
 
+## Backups
+
+The free Supabase plan has no automatic backups, so download one now and then:
+
+- **On the site:** History page → **Backup**. The CSV files (games, visits, players) open in Excel, Numbers or Google Sheets. **Full backup (JSON)** keeps every table exactly as stored, ids included, so the database can be rebuilt from it.
+- **In Supabase:** Table Editor → pick a table → **Export → CSV**.
+
 ## Notes
 
 - Free Supabase projects pause after about a week without activity. Weekly use normally keeps yours awake, and you can unpause it from the Supabase dashboard.

@@ -1765,13 +1765,88 @@
 
   // ----- History
 
+  // ----- Backup
+
+  // Text cells starting with = + - @ are prefixed so spreadsheets don't run them as formulas.
+  function csvCell(v) {
+    if (v == null) return '';
+    let t = String(v);
+    if (typeof v === 'string' && /^[=+\-@]/.test(t)) t = "'" + t;
+    return /[",\n\r]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+  }
+
+  function toCsv(header, rows) {
+    // The byte-order mark makes Excel open the file as UTF-8.
+    return '﻿' + [header, ...rows].map((r) => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
+  }
+
+  function download(filename, text, type) {
+    const url = URL.createObjectURL(new Blob([text], { type }));
+    const a = h('a', { href: url, download: filename, style: 'display:none' });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function exportFile(kind) {
+    const d = state.d;
+    const raw = state.raw;
+    const stamp = todayIso();
+    if (kind === 'players') {
+      download(`squash-players-${stamp}.csv`, toCsv(['name', 'subscriber_since', 'active', 'added_on'],
+        d.players.map((p) => [p.name, subStart(p) || '', p.active !== false ? 'yes' : 'no', String(p.created_at || '').slice(0, 10)])), 'text/csv');
+    } else if (kind === 'visits') {
+      const rows = [];
+      for (const sess of d.sessions) {
+        for (const pid of [...(d.attBySession.get(sess.id) || [])].sort((a, b) => nameOf(a).localeCompare(nameOf(b)))) {
+          rows.push([sess.played_on, fmtDate(sess.played_on, { weekday: 'long', day: undefined, month: undefined, year: undefined }), sess.slot, SLOTS[sess.slot].label, CFG.slotValues[sess.slot] || 0, nameOf(pid), sess.note || '']);
+        }
+      }
+      download(`squash-visits-${stamp}.csv`, toCsv(['date', 'weekday', 'slot', 'slot_label', 'value_eur', 'player', 'note'], rows), 'text/csv');
+    } else if (kind === 'games') {
+      const rows = [];
+      for (const sess of d.sessions) {
+        (d.gamesBySession.get(sess.id) || []).forEach((g, i) => {
+          rows.push([sess.played_on, sess.slot, i + 1, nameOf(g.player_a), g.score_a, g.start_a || 0, nameOf(g.player_b), g.score_b, g.start_b || 0, nameOf(g.score_a > g.score_b ? g.player_a : g.player_b)]);
+        });
+      }
+      download(`squash-games-${stamp}.csv`, toCsv(['date', 'slot', 'game', 'player_a', 'score_a', 'head_start_a', 'player_b', 'score_b', 'head_start_b', 'winner'], rows), 'text/csv');
+    } else {
+      // Everything exactly as stored, ids included, so it can be restored.
+      const backup = {
+        app: 'squash-tracker', version: 1, exported_at: new Date().toISOString(),
+        settings: { seasonStart: CFG.seasonStart, subscriptionPrice: CFG.subscriptionPrice, slotValues: CFG.slotValues },
+        players: raw.players, sessions: raw.sessions, attendance: raw.attendance, games: raw.games,
+      };
+      download(`squash-backup-${stamp}.json`, JSON.stringify(backup, null, 2), 'application/json');
+    }
+  }
+
+  function backupCard() {
+    const d = state.d;
+    return h('section', { class: 'card' },
+      h('h2', null, 'Backup'),
+      h('p', { class: 'sub' }, `Download everything that's logged: ${d.players.length} players, ${d.sessions.length} sessions, ${d.games.length} games. The CSV files open in Excel, Numbers or Google Sheets; the full backup keeps everything exactly as stored, so it can be restored.`),
+      h('div', { class: 'actions' },
+        h('button', { class: 'btn', onclick: () => exportFile('games') }, 'Games (CSV)'),
+        h('button', { class: 'btn', onclick: () => exportFile('visits') }, 'Visits (CSV)'),
+        h('button', { class: 'btn', onclick: () => exportFile('players') }, 'Players (CSV)'),
+        h('button', { class: 'btn btn-primary', onclick: () => exportFile('full') }, 'Full backup (JSON)')));
+  }
+
+  // ----- History
+
   function viewHistory() {
     const d = state.d;
     const frag = h('div');
     frag.append(h('div', { class: 'view-head' }, h('h1', null, 'History'),
+      h('a', { class: 'small', href: '#history', onclick: (e) => { e.preventDefault(); document.getElementById('backup-card')?.scrollIntoView({ behavior: 'smooth' }); } }, 'Download a backup'),
       state.unlocked ? h('span', { class: 'muted small' }, 'Editing is on') : h('a', { class: 'small', href: '#log' }, 'Enter the group code to edit')));
+    const backup = backupCard();
+    backup.id = 'backup-card';
     if (!d.sessions.length) {
-      frag.append(h('p', { class: 'empty' }, 'No sessions logged yet.'));
+      frag.append(h('p', { class: 'empty' }, 'No sessions logged yet.'), backup);
       return frag;
     }
     let month = null;
@@ -1783,6 +1858,7 @@
       }
       frag.append(sessionCard(sess));
     }
+    frag.append(backup);
     return frag;
   }
 
