@@ -3,7 +3,7 @@
 // Leave supabaseUrl empty to run in demo mode with sample data (stored only in
 // your own browser). Fill in both Supabase values to use the shared database.
 window.SQUASH_CONFIG = {
-  title: 'Squash Crew',
+  title: 'Squash Team Eindhoven',
 
   // Supabase -> Project Settings -> API (or "Connect"). The publishable/anon key
   // is meant to be public; the group code in schema.sql protects writes.

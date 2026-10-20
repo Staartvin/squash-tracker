@@ -10,7 +10,7 @@
 
   const userCfg = window.SQUASH_CONFIG || {};
   const CFG = {
-    title: userCfg.title || 'Squash Crew',
+    title: userCfg.title || 'Squash Team Eindhoven',
     supabaseUrl: (userCfg.supabaseUrl || '').replace(/\/+$/, ''),
     supabaseKey: userCfg.supabaseKey || '',
     seasonStart: userCfg.seasonStart || '2026-09-01',

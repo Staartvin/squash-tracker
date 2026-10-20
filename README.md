@@ -1,4 +1,6 @@
-# Squash Crew tracker
+# Squash Team Eindhoven
+
+The squash tracker of Squash Team Eindhoven, a group of friends who met at Solar Team Eindhoven. The site wears Solar Team Eindhoven's yellow and black as a nod to that; it is unofficial and not affiliated with the team.
 
 A single static page that tracks:
 

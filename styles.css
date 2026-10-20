@@ -2,23 +2,27 @@
 
 :root {
   color-scheme: light;
-  --page: #f9f9f7;
-  --surface: #fcfcfb;
+  --page: #f6f6f3;
+  --surface: #ffffff;
   --raised: #ffffff;
   --ink: #0b0b0b;
-  --ink-2: #52514e;
-  --muted: #898781;
-  --grid: #e1e0d9;
-  --axis: #c3c2b7;
+  --ink-2: #333333;
+  --muted: #767f67;
+  --grid: #ededed;
+  --axis: #c9c9c4;
   --border: rgba(11, 11, 11, 0.10);
   --hover: rgba(11, 11, 11, 0.04);
-  --accent: #2a78d6;
-  --accent-ink: #ffffff;
-  --track: #cde2fb;
+  --accent: #ffdd00;
+  --accent-ink: #000000;
+  --track: #333333;
   --good: #0ca30c;
   --good-text: #006300;
   --bad-text: #b52f2f;
-  --focus: #2a78d6;
+  --focus: #000000;
+  --link: #000000;
+  --header-bg: #000000;
+  --header-ink: #ffffff;
+  --header-ink-2: #c4c4c4;
 
   --s1: #2a78d6;
   --s2: #eb6834;
@@ -29,11 +33,11 @@
   --s7: #6250d6;
   --s8: #e34948;
 
-  --heat-0: #ebeae4;
-  --heat-1: #b7d3f6;
-  --heat-2: #6da7ec;
-  --heat-3: #2a78d6;
-  --heat-4: #184f95;
+  --heat-0: #ededed;
+  --heat-1: #f2d300;
+  --heat-2: #c9a900;
+  --heat-3: #957d00;
+  --heat-4: #5c4d00;
   --div-neg: #e34948;
   --div-mid: #f0efec;
   --div-pos: #2a78d6;
@@ -44,23 +48,27 @@
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
     color-scheme: dark;
-    --page: #0d0d0d;
-    --surface: #1a1a19;
-    --raised: #222220;
-    --ink: #f0efec;
-    --ink-2: #c3c2b7;
-    --muted: #898781;
-    --grid: #2c2c2a;
-    --axis: #383835;
+    --page: #0b0b0b;
+    --surface: #171717;
+    --raised: #1f1f1f;
+    --ink: #f5f5f2;
+    --ink-2: #c9c9c4;
+    --muted: #8f9682;
+    --grid: #2a2a2a;
+    --axis: #3d3d3a;
     --border: rgba(255, 255, 255, 0.10);
     --hover: rgba(255, 255, 255, 0.05);
-    --accent: #3987e5;
-    --accent-ink: #0b0b0b;
-    --track: #0d366b;
+    --accent: #ffdd00;
+    --accent-ink: #000000;
+    --track: #3d3d3a;
     --good: #0ca30c;
     --good-text: #0ca30c;
     --bad-text: #e66767;
-    --focus: #6da7ec;
+    --focus: #ffdd00;
+    --link: #ffdd00;
+    --header-bg: #000000;
+    --header-ink: #ffffff;
+    --header-ink-2: #c4c4c4;
 
     --s1: #3987e5;
     --s2: #d95926;
@@ -70,11 +78,11 @@
     --s6: #008300;
     --s7: #9085e9;
     --s8: #e66767;
-    --heat-0: #2c2c2a;
-    --heat-1: #104281;
-    --heat-2: #1c5cab;
-    --heat-3: #3987e5;
-    --heat-4: #86b6ef;
+    --heat-0: #2a2a2a;
+    --heat-1: #5c4d00;
+    --heat-2: #957d00;
+    --heat-3: #c9a900;
+    --heat-4: #ffdd00;
     --div-neg: #e66767;
     --div-mid: #383835;
     --div-pos: #3987e5;
@@ -83,23 +91,27 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --page: #0d0d0d;
-  --surface: #1a1a19;
-  --raised: #222220;
-  --ink: #f0efec;
-  --ink-2: #c3c2b7;
-  --muted: #898781;
-  --grid: #2c2c2a;
-  --axis: #383835;
+  --page: #0b0b0b;
+  --surface: #171717;
+  --raised: #1f1f1f;
+  --ink: #f5f5f2;
+  --ink-2: #c9c9c4;
+  --muted: #8f9682;
+  --grid: #2a2a2a;
+  --axis: #3d3d3a;
   --border: rgba(255, 255, 255, 0.10);
   --hover: rgba(255, 255, 255, 0.05);
-  --accent: #3987e5;
-  --accent-ink: #0b0b0b;
-  --track: #0d366b;
+  --accent: #ffdd00;
+  --accent-ink: #000000;
+  --track: #3d3d3a;
   --good: #0ca30c;
   --good-text: #0ca30c;
   --bad-text: #e66767;
-  --focus: #6da7ec;
+  --focus: #ffdd00;
+  --link: #ffdd00;
+  --header-bg: #000000;
+  --header-ink: #ffffff;
+  --header-ink-2: #c4c4c4;
 
   --s1: #3987e5;
   --s2: #d95926;
@@ -109,11 +121,11 @@
   --s6: #008300;
   --s7: #9085e9;
   --s8: #e66767;
-  --heat-0: #2c2c2a;
-  --heat-1: #104281;
-  --heat-2: #1c5cab;
-  --heat-3: #3987e5;
-  --heat-4: #86b6ef;
+  --heat-0: #2a2a2a;
+  --heat-1: #5c4d00;
+  --heat-2: #957d00;
+  --heat-3: #c9a900;
+  --heat-4: #ffdd00;
   --div-neg: #e66767;
   --div-mid: #383835;
   --div-pos: #3987e5;
@@ -130,7 +142,7 @@ body {
   font: 15px/1.5 var(--font);
 }
 
-a { color: var(--accent); }
+a { color: var(--link); }
 
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
@@ -142,24 +154,26 @@ a { color: var(--accent); }
   position: sticky;
   top: 0;
   z-index: 10;
-  background: color-mix(in srgb, var(--page) 88%, transparent);
-  backdrop-filter: blur(8px);
-  border-bottom: 1px solid var(--border);
+  background: var(--header-bg);
+  border-bottom: 3px solid var(--accent);
 }
 .top-inner { display: flex; align-items: center; gap: 16px; min-height: 56px; flex-wrap: wrap; }
-.brand { font-weight: 650; font-size: 17px; color: var(--ink); text-decoration: none; margin-right: auto; }
+.brand { font-weight: 700; font-size: 17px; color: var(--header-ink); text-decoration: none; margin-right: auto; display: inline-flex; align-items: center; gap: 8px; letter-spacing: 0.01em; }
+.brand::before { content: ""; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px rgba(255, 221, 0, 0.25); flex: none; }
 .tabs { display: flex; gap: 4px; flex-wrap: wrap; }
 .tabs a {
-  color: var(--ink-2);
+  color: var(--header-ink-2);
   text-decoration: none;
   padding: 6px 10px;
   border-radius: 8px;
   font-weight: 500;
 }
-.tabs a:hover { background: var(--hover); }
-.tabs a[aria-current="page"] { color: var(--ink); background: var(--hover); }
+.tabs a:hover { background: rgba(255, 255, 255, 0.08); color: var(--header-ink); }
+.tabs a[aria-current="page"] { color: var(--header-ink); background: rgba(255, 255, 255, 0.10); box-shadow: inset 0 -2px 0 var(--accent); }
 .tabs a.tab-log { color: var(--accent-ink); background: var(--accent); }
-.tabs a.tab-log[aria-current="page"] { box-shadow: inset 0 0 0 2px var(--ink); }
+.tabs a.tab-log:hover { background: var(--accent); filter: brightness(1.05); }
+.tabs a.tab-log[aria-current="page"] { box-shadow: inset 0 0 0 2px var(--header-ink); }
+.top :focus-visible { outline-color: var(--accent); }
 
 @media (max-width: 520px) {
   .top-inner { padding-top: 8px; padding-bottom: 8px; gap: 6px; }
@@ -362,7 +376,7 @@ textarea { min-height: 64px; resize: vertical; }
 .choice > span small { color: var(--ink-2); font-size: 12px; }
 .choice > span { flex-wrap: wrap; row-gap: 0; }
 .choice-label { white-space: nowrap; }
-.choice > input:checked + span { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--raised)); }
+.choice > input:checked + span { border-color: var(--focus); box-shadow: inset 0 0 0 1px var(--focus); background: color-mix(in srgb, var(--accent) 22%, var(--raised)); }
 .choice > input:focus-visible + span { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 .game-rows { display: grid; gap: 10px; margin-bottom: 10px; }
@@ -405,7 +419,7 @@ textarea { min-height: 64px; resize: vertical; }
 .btn:hover { background: var(--hover); }
 .btn:disabled { opacity: 0.5; cursor: default; }
 .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
-.btn-primary:hover { background: var(--accent); filter: brightness(1.08); }
+.btn-primary:hover { background: var(--accent); filter: brightness(0.95); }
 .btn-ghost { border-color: transparent; background: transparent; color: var(--ink-2); }
 .btn-small { min-height: 30px; padding: 4px 10px; font-size: 13px; }
 .btn-icon {
@@ -477,8 +491,8 @@ textarea { min-height: 64px; resize: vertical; }
 .hc-line input[type="number"] { width: 52px; min-height: 30px; padding: 2px 6px; text-align: center; }
 .start-tag { font-size: 11px; color: var(--ink-2); border: 1px solid var(--border); border-radius: 999px; padding: 0 5px; font-weight: 500; }
 .btn-danger { color: var(--bad-text); }
-.card.editing { box-shadow: inset 0 0 0 2px var(--accent); }
-.notice a { color: var(--accent); }
+.card.editing { box-shadow: inset 0 0 0 2px var(--focus), inset 0 5px 0 var(--accent); }
+.notice a { color: var(--link); }
 
 /* Milestones */
 
@@ -523,3 +537,8 @@ table.h2h td.self { background: transparent; }
   .badge { flex-direction: column; gap: 2px; padding: 8px 10px; }
   .badge-label { font-size: 13px; }
 }
+
+/* Footer */
+
+.site-foot { color: var(--muted); font-size: 12px; text-align: center; padding: 8px 16px 32px; }
+.site-foot .sun { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-right: 6px; vertical-align: 1px; }
