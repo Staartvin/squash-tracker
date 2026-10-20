@@ -75,6 +75,7 @@ If you set up the database before a change that needs one, run the matching file
 ## Day to day
 
 - **Log a visit:** on the **+ Log** page, pick the date and slot, tick who was there and add each game, for example 9–11. Logging the same date and slot again adds to that session, so a visit is never counted twice.
+- **Share a session:** after saving, or from any session in **History**, press **Share on WhatsApp** to open WhatsApp with a summary filled in (games, wins, rating changes, streaks, new milestones, break-even and a link back), then pick the group. **Copy summary** puts the same text on the clipboard.
 - **Fix a mistake:** with the group code entered, press **Edit** on a session in **History**. You can change the date, slot, who was there and every game, or delete the session.
 - **Head starts:** when you pick two players for a game, the form suggests a head start if their ratings differ. Press **Use** to apply it, and enter the final scoreboard (head start included).
 - **Change the group code:** run this in the Supabase SQL Editor:

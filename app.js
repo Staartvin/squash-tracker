@@ -455,7 +455,7 @@
       for (const [pid, r0] of before) {
         const P = stats.get(pid);
         P.lastDelta = P.rating - r0;
-        P.history.push({ x: sess.played_on, y: P.rating });
+        P.history.push({ x: sess.played_on, y: P.rating, session: sess.id });
         const t = tally.get(pid);
         P.perSession.push({ x: sess.played_on, y: t.pf / t.games, games: t.games, wins: t.wins, pf: t.pf, pa: t.pa });
       }
@@ -502,7 +502,7 @@
       st.winStreak = winStreak(st.recent);
     }
 
-    return { players, pById, sessions, games, gamesBySession, attBySession, stats, ranked, rankOf, upset, marathon };
+    return { players, pById, sessions, games, gamesBySession, attBySession, stats, ranked, rankOf, upset, marathon, weeksBy };
   }
 
   function visitValue(d, playerId, from, to) {
@@ -916,6 +916,12 @@
     const views = { dashboard: viewDashboard, players: () => viewPlayers(arg), recap: () => viewRecap(arg), history: viewHistory, log: viewLog };
     app.replaceChildren(views[view]());
     if (view === 'log') window.scrollTo(0, scrollY);
+    if (view === 'history' && arg && state.focusedSession !== arg) {
+      // A shared link like #history/<session id>: scroll to that session once.
+      state.focusedSession = arg;
+      // Look the card up when scrolling: another render may have replaced it by then.
+      setTimeout(() => document.getElementById('session-' + arg)?.scrollIntoView({ block: 'start' }), 50);
+    }
   }
 
   function renderBanner() {
@@ -1888,7 +1894,7 @@
     const games = d.gamesBySession.get(sess.id) || [];
     const att = [...(d.attBySession.get(sess.id) || [])].sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
     const edit = state.unlocked;
-    return h('article', { class: 'card' },
+    return h('article', { class: 'card' + (state.focusedSession === sess.id ? ' focused' : ''), id: 'session-' + sess.id },
       h('div', { class: 'session-head' },
         h('h3', null, fmtDay(sess.played_on)),
         h('span', { class: 'pill' }, SLOTS[sess.slot].label),
@@ -1902,7 +1908,100 @@
           h('span', { class: 'side' + (aWin ? ' win' : ''), style: 'justify-content:flex-end' }, startTag(g.start_a), h('span', null, nameOf(g.player_a)), dotFor(g.player_a)),
           h('span', { class: 'score' }, gameScore(g)),
           h('span', { class: 'side right' + (aWin ? '' : ' win') }, dotFor(g.player_b), h('span', null, nameOf(g.player_b)), startTag(g.start_b)));
-      })) : h('p', { class: 'muted small', style: 'margin:0' }, 'No scores logged.'));
+      })) : h('p', { class: 'muted small', style: 'margin:0' }, 'No scores logged.'),
+      h('div', { class: 'share-row' }, shareButtons(() => sessionSummary(sess))));
+  }
+
+  // ----- Sharing a session
+
+  const sessionLink = (sess) => location.origin + location.pathname + '#history/' + encodeURIComponent(sess.id);
+
+  // A WhatsApp-ready summary of one session: games, wins, rating changes,
+  // streaks, new milestones and break-even, as things stood after that session.
+  function sessionSummary(sess) {
+    const d = state.d;
+    const games = d.gamesBySession.get(sess.id) || [];
+    const att = [...(d.attBySession.get(sess.id) || [])].sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+    const lines = [`🎾 ${CFG.title} · ${fmtDay(sess.played_on)} (${SLOTS[sess.slot].label})`, `👥 ${att.map(nameOf).join(', ')}`];
+    if (sess.note) lines.push(`📝 ${sess.note}`);
+
+    if (games.length) {
+      lines.push('', `Games (${games.length}):`);
+      for (const g of games) {
+        const aWon = g.score_a > g.score_b;
+        const side = (pid, start) => nameOf(pid) + (start ? ` (+${start})` : '');
+        lines.push(aWon
+          ? `${side(g.player_a, g.start_a)} ${g.score_a}–${g.score_b} ${side(g.player_b, g.start_b)}`
+          : `${side(g.player_b, g.start_b)} ${g.score_b}–${g.score_a} ${side(g.player_a, g.start_a)}`);
+      }
+      const record = new Map();
+      for (const g of games) {
+        for (const [pid, won] of [[g.player_a, g.score_a > g.score_b], [g.player_b, g.score_b > g.score_a]]) {
+          const r = record.get(pid) || { w: 0, l: 0 };
+          won ? r.w++ : r.l++;
+          record.set(pid, r);
+        }
+      }
+      const order = [...record.entries()].sort((a, b) => b[1].w - a[1].w || a[1].l - b[1].l);
+      lines.push('', '🏆 ' + order.map(([pid, r]) => `${nameOf(pid)} ${r.w}–${r.l}`).join(' · '));
+
+      const ratings = order.map(([pid]) => {
+        const hist = d.stats.get(pid).history;
+        const i = hist.findIndex((pt) => pt.session === sess.id);
+        if (i < 0) return null;
+        const delta = hist[i].y - (i > 0 ? hist[i - 1].y : ELO_START);
+        return `${nameOf(pid)} ${Math.round(hist[i].y)} (${fmtSigned(delta)})`;
+      }).filter(Boolean);
+      if (ratings.length) lines.push('📈 ' + ratings.join(' · '));
+    } else {
+      lines.push('', 'No scores logged, but it counts for the streaks and break-even.');
+    }
+
+    // Week streaks as they stood that week.
+    const week = weekOf(sess.played_on);
+    const streaks = att.map((pid) => {
+      let n = 0;
+      for (let w = week; d.weeksBy.get(pid)?.has(w); w--) n++;
+      return [pid, n];
+    }).filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1]);
+    if (streaks.length) lines.push('🔥 ' + streaks.map(([pid, n]) => `${nameOf(pid)} ${n} weeks in a row`).join(' · '));
+
+    const unlocked = att.flatMap((pid) => milestones(d, pid).done.filter((m) => m.date === sess.played_on).map((m) => `${nameOf(pid)}: ${m.label}`));
+    if (unlocked.length) lines.push('🔓 ' + unlocked.join(' · '));
+
+    // Break-even for subscribers who were there, in the subscription year this session falls in.
+    const money = att.map((pid) => {
+      const p = d.pById.get(pid);
+      const years = subYearsDone(p);
+      if (years == null) return null;
+      for (let ago = 0; ago <= years; ago++) {
+        const row = breakEven(d, ago).find((r) => r.player.id === pid);
+        if (row && sess.played_on >= row.season.start && sess.played_on < row.season.end) {
+          const total = (valueAt(row.points, sess.played_on) || { y: 0 }).y;
+          return `${nameOf(pid)} ${fmtEuro(total)}${total >= CFG.subscriptionPrice ? ' ✅' : ''}`;
+        }
+      }
+      return null;
+    }).filter(Boolean);
+    if (money.length) lines.push(`💶 ${money.join(' · ')} (of ${fmtEuro(CFG.subscriptionPrice)})`);
+
+    lines.push('', sessionLink(sess));
+    return lines.join('\n');
+  }
+
+  // "WhatsApp" opens WhatsApp (app or web) with the text filled in, so you only
+  // pick the group; "Copy" is there for anywhere else.
+  function shareButtons(getText) {
+    return [
+      h('button', {
+        type: 'button', class: 'btn btn-small btn-wa',
+        onclick: () => window.open('https://wa.me/?text=' + encodeURIComponent(getText()), '_blank', 'noopener'),
+      }, 'Share on WhatsApp'),
+      h('button', {
+        type: 'button', class: 'btn btn-small',
+        onclick: async () => toast((await copyText(getText())) ? 'Summary copied' : 'Could not copy'),
+      }, 'Copy summary'),
+    ];
   }
 
   // ----- Log
@@ -1915,6 +2014,15 @@
     if (!state.unlocked) {
       frag.append(unlockCard());
       return frag;
+    }
+    const saved = state.justSaved && state.d.sessions.find((x) => x.id === state.justSaved);
+    if (saved) {
+      frag.append(h('section', { class: 'card share-prompt' },
+        h('div', { class: 'card-head' },
+          h('h2', null, `Saved · ${fmtDay(saved.played_on)}`),
+          h('button', { class: 'btn btn-small btn-ghost', onclick: () => { state.justSaved = null; render(); } }, 'Close')),
+        h('p', { class: 'sub' }, 'Let the group know how it went. Adding more games? Save them first, then share.'),
+        h('div', { class: 'share-row' }, shareButtons(() => sessionSummary(state.d.sessions.find((x) => x.id === saved.id) || saved)))));
     }
     frag.append(sessionForm());
     frag.append(playersCard());
@@ -2073,7 +2181,7 @@
         const n = payload.games.length;
         if (editing) {
           const ok = await act(() => api.updateSession(state.code, payload), 'Session updated');
-          if (ok) leaveEdit('#history');
+          if (ok) { state.focusedSession = null; leaveEdit('#history/' + encodeURIComponent(payload.id)); }
           else saveBtn.disabled = false;
           return;
         }
@@ -2081,8 +2189,10 @@
         if (ok) {
           // Keep date, slot and who's there so the next batch of games is quick to add.
           state.draft = { date: dr.date, slot: dr.slot, playerIds: payload.playerIds, games: [], note: '' };
+          state.justSaved = state.d.sessions.find((x) => x.played_on === dr.date && x.slot === dr.slot)?.id || null;
           saveDraft();
           render();
+          window.scrollTo(0, 0);
         } else {
           saveBtn.disabled = false;
         }
@@ -2186,6 +2296,8 @@
 
   document.title = CFG.title;
   document.getElementById('site-title').textContent = CFG.title;
+  // Shared session links scroll themselves; don't let the browser restore an old position over that.
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
   window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
   window.addEventListener('scroll', hideTooltip, { passive: true });
 
