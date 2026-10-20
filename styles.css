@@ -1,5 +1,23 @@
 /* Squash tracker styles. Colors are tokens so light and dark swap in one place. */
 
+/* Montserrat (SIL Open Font License, see fonts/OFL.txt), served from this repo. */
+@font-face {
+  font-family: "Montserrat";
+  font-style: normal;
+  font-weight: 500 800;
+  font-display: swap;
+  src: url("fonts/montserrat-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Montserrat";
+  font-style: normal;
+  font-weight: 500 800;
+  font-display: swap;
+  src: url("fonts/montserrat-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 :root {
   color-scheme: light;
   --page: #f6f6f3;
@@ -42,7 +60,8 @@
   --div-mid: #f0efec;
   --div-pos: #2a78d6;
   --radius: 12px;
-  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font: "Avenir Next", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-display: "Montserrat", "Avenir Next", system-ui, sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -159,7 +178,12 @@ a { color: var(--link); }
 }
 .top-inner { display: flex; align-items: center; gap: 16px; min-height: 56px; flex-wrap: wrap; }
 .brand { font-weight: 700; font-size: 17px; color: var(--header-ink); text-decoration: none; margin-right: auto; display: inline-flex; align-items: center; gap: 8px; letter-spacing: 0.01em; }
-.brand::before { content: ""; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px rgba(255, 221, 0, 0.25); flex: none; }
+.brand { gap: 10px; }
+.logo { width: 96px; height: 26px; flex: none; overflow: visible; }
+@media (max-width: 520px) { .logo { width: 78px; height: 21px; } }
+.logo .logo-line { stroke: var(--accent); }
+.logo .logo-ball { fill: var(--header-bg); stroke: var(--accent); }
+.logo .logo-dot { fill: var(--accent); }
 .tabs { display: flex; gap: 4px; flex-wrap: wrap; }
 .tabs a {
   color: var(--header-ink-2);
@@ -541,4 +565,15 @@ table.h2h td.self { background: transparent; }
 /* Footer */
 
 .site-foot { color: var(--muted); font-size: 12px; text-align: center; padding: 8px 16px 32px; }
-.site-foot .sun { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-right: 6px; vertical-align: 1px; }
+.logo-foot { width: 90px; height: 24px; display: block; margin: 0 auto 8px; }
+.site-foot .logo .logo-line, .site-foot .logo .logo-ball { stroke: var(--muted); }
+.site-foot .logo .logo-ball { fill: var(--page); }
+.site-foot .logo .logo-dot { fill: var(--accent); }
+
+/* Montserrat for headings and big numbers, like Solar Team Eindhoven's site */
+
+h1, h2, h3, .brand, .tile .value, .meter-amount strong, .award-who, .month-head, .tabs a {
+  font-family: var(--font-display);
+}
+.view-head h1 { font-weight: 800; letter-spacing: -0.01em; }
+.card > h2, .card-head h2, .session-head h3 { font-weight: 700; }
