@@ -56,10 +56,12 @@ Then open the page, go to **+ Log**, enter the group code, and add the players. 
 
 ## 3. Hosting (GitHub Pages)
 
-This repository is published with GitHub Pages from the `main` branch, root folder:
-https://staartvin.github.io/squash-tracker/
+This repository is published with GitHub Pages from the `main` branch, root folder, at:
+https://squash.swevels.com/
 
 Every push to `main` updates the site within a minute or two. Settings live under the repository's **Settings → Pages**. The empty `.nojekyll` file tells Pages to serve the files as they are.
+
+The custom domain comes from a DNS record `squash` CNAME `staartvin.github.io` at swevels.com, plus the `CNAME` file in this repository (GitHub adds it when you set the domain in Settings → Pages; don't delete it). The old address https://staartvin.github.io/squash-tracker/ redirects to the new one.
 
 The page uses relative paths, so you can also copy `index.html`, `styles.css`, `app.js` and `config.js` into any other static host or subfolder.
 
