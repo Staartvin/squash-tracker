@@ -1,7 +1,5 @@
 # Squash Team Eindhoven
 
-<img src="logo.svg" alt="" width="240">
-
 The squash tracker of Squash Team Eindhoven, a group of friends who met at Solar Team Eindhoven. The site wears Solar Team Eindhoven's yellow and black as a nod to that; it is unofficial and not affiliated with the team.
 
 A single static page that tracks:
@@ -24,7 +22,6 @@ No build step. The page is plain HTML, CSS and JavaScript, and the data lives in
 | `index.html`, `styles.css`, `app.js` | The page. Upload these as they are. |
 | `config.js` | Your settings: Supabase details, season start date, prices. |
 | `fonts/` | Montserrat for headings, served from this repo (SIL Open Font License, see `fonts/OFL.txt`). |
-| `logo.svg` | The logo: a stylised solar car with squash-ball wheels. |
 | `supabase/schema.sql` | Run this once in Supabase to create the database. Don't upload it to your site. |
 
 ## 1. Try it locally (demo mode)

@@ -179,11 +179,9 @@ a { color: var(--link); }
 .top-inner { display: flex; align-items: center; gap: 16px; min-height: 56px; flex-wrap: wrap; }
 .brand { font-weight: 700; font-size: 17px; color: var(--header-ink); text-decoration: none; margin-right: auto; display: inline-flex; align-items: center; gap: 8px; letter-spacing: 0.01em; }
 .brand { gap: 10px; }
-.logo { width: 96px; height: 26px; flex: none; overflow: visible; }
-@media (max-width: 520px) { .logo { width: 78px; height: 21px; } }
-.logo .logo-line { stroke: var(--accent); }
-.logo .logo-ball { fill: var(--header-bg); stroke: var(--accent); }
-.logo .logo-dot { fill: var(--accent); }
+.ball { width: 18px; height: 18px; flex: none; }
+.ball circle { fill: #000; stroke: var(--accent); stroke-width: 2; }
+.ball .dot { fill: var(--accent); stroke: none; }
 .tabs { display: flex; gap: 4px; flex-wrap: wrap; }
 .tabs a {
   color: var(--header-ink-2);
@@ -565,10 +563,6 @@ table.h2h td.self { background: transparent; }
 /* Footer */
 
 .site-foot { color: var(--muted); font-size: 12px; text-align: center; padding: 8px 16px 32px; }
-.logo-foot { width: 90px; height: 24px; display: block; margin: 0 auto 8px; }
-.site-foot .logo .logo-line, .site-foot .logo .logo-ball { stroke: var(--muted); }
-.site-foot .logo .logo-ball { fill: var(--page); }
-.site-foot .logo .logo-dot { fill: var(--accent); }
 
 /* Montserrat for headings and big numbers, like Solar Team Eindhoven's site */
 
