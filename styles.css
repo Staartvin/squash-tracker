@@ -631,3 +631,40 @@ table.hc-table tr.chosen td { background: color-mix(in srgb, var(--accent) 28%, 
 .hc-line select { width: auto; min-height: 30px; padding: 2px 6px; font-size: 13px; }
 .hc-reminder { flex-basis: 100%; font-size: 12px; color: var(--ink-2); }
 .notice.score-rule { margin: 0 0 10px; }
+
+/* Logging flow */
+
+.choose-block { border-top: 1px solid var(--grid); padding-top: 14px; margin-top: 14px; }
+.choose-block:first-of-type { border-top: 0; padding-top: 0; }
+.choose-block h3 { font-size: 15px; margin: 0 0 10px; }
+.notice.clash { margin: 0; border-left: 4px solid var(--accent); }
+.notice.resume { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; justify-content: space-between; margin: 0 0 14px; }
+.recent-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.recent-list li { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; justify-content: space-between; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--raised); }
+
+.mode-banner { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; align-items: center; border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; border: 2px solid var(--border); }
+.mode-banner > :nth-child(2) { grid-column: 1; color: var(--ink-2); }
+.mode-banner > button { grid-column: 2; grid-row: 1 / span 2; }
+.mode-banner strong { font-family: var(--font-display); font-size: 17px; }
+.mode-kind { text-transform: uppercase; font-size: 11px; letter-spacing: 0.06em; font-weight: 700; border-radius: 999px; padding: 2px 8px; margin-right: 4px; vertical-align: 2px; }
+.mode-new { border-color: color-mix(in srgb, var(--good) 55%, transparent); background: color-mix(in srgb, var(--good) 8%, var(--surface)); }
+.mode-new .mode-kind { background: var(--good); color: #fff; }
+.mode-add { border-color: var(--s1); background: color-mix(in srgb, var(--s1) 8%, var(--surface)); }
+.mode-add .mode-kind { background: var(--s1); color: #fff; }
+.mode-edit { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--surface)); }
+.mode-edit .mode-kind { background: var(--accent); color: #000; }
+
+.field.already { background: var(--hover); border-radius: 10px; padding: 10px 12px; }
+.game-list.compact li { padding: 2px 0; font-size: 13px; }
+
+.review-list { list-style: none; padding: 0; margin: 6px 0 10px; display: grid; gap: 4px; }
+.review-list li { padding: 6px 10px; border-radius: 8px; background: var(--hover); font-size: 14px; }
+.review-list li.added, .review-list.added li { border-left: 4px solid var(--good); }
+.review-list li.removed { border-left: 4px solid var(--bad-text); background: color-mix(in srgb, var(--bad-text) 10%, var(--surface)); }
+.review-list li.changed { border-left: 4px solid var(--accent); }
+.notice.warn { border-left: 4px solid var(--bad-text); color: var(--ink); }
+.btn-warn { background: var(--bad-text); border-color: var(--bad-text); color: #fff; }
+
+.changes-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.changes-list li { display: flex; gap: 8px 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 8px 10px; border-radius: 8px; background: var(--hover); font-size: 14px; }
+.changes-list li.has-removed { border-left: 4px solid var(--bad-text); }

@@ -72,12 +72,14 @@ If you set up the database before a change that needs one, run the matching file
 
 - `supabase/002_subscription_start.sql`: gives each player their own subscription start date.
 - `supabase/003_head_starts_and_editing.sql`: head starts per game, and editing a whole session at once.
+- `supabase/004_change_history.sql`: a history of every change (who, before and after) with restore, and a guard against overwriting a session someone else just changed.
 
 ## Day to day
 
-- **Log a visit:** on the **+ Log** page, pick the date and slot, tick who was there and add each game, for example 9–11. Logging the same date and slot again adds to that session, so a visit is never counted twice.
+- **Log a visit:** on **+ Log**, first say who you are (once per device). Then choose what you're logging: **a new session** (pick the date and slot) or **Add games** / **Edit** on a session that's already logged. A coloured banner always shows which session the form writes to: green **New session**, blue **Adding to** (only adds; nothing saved changes), yellow **Editing** (can change and remove). **Check and save** shows exactly what will be created, added or removed before anything is saved, and the done screen has **Undo**.
 - **Share a session:** after saving, or from any session in **History**, press **Share on WhatsApp** to open WhatsApp with a summary filled in (games, wins, rating changes, streaks, new milestones, break-even and a link back), then pick the group. **Copy summary** puts the same text on the clipboard.
-- **Fix a mistake:** with the group code entered, press **Edit** on a session in **History**. You can change the date, slot, who was there and every game, or delete the session.
+- **Fix a mistake:** with the group code entered, press **Edit** on a session in **History**. You can change the date, slot, who was there and every game, or delete the session. The check step lists every game or person that would be removed.
+- **Undo anything:** **Recent changes** (on the Log start screen and in History) lists every save, edit and delete with who did it and when. **Restore before this** puts that session back exactly as it was before that change.
 - **Head starts:** when you pick two players for a game, the form suggests a head start. Press **Use**, or **Other head start** to record the one you actually played. Always enter who had it, what they started on, and the final score with the head start included (started at 4–0 and won 11–9 → enter 11–9 with a 4–0 head start). Leaving the head start out skews the ratings.
 - **Change the group code:** run this in the Supabase SQL Editor:
 
@@ -104,6 +106,12 @@ For people without a subscription, the dashboard shows what their visits over th
 **Records.** The upset is the win the model rated least likely beforehand (under 40%), using only the games before that session. Nemesis and favourite opponent on a player's page need at least 3 games against that person.
 
 **Head starts.** The suggested head start is the one that makes a game closest to 50/50. The prediction model estimates the weaker player's chance of winning a rally, works out exactly how likely they are to win the game when starting at 0–0, 1–0, … 9–0, and picks the start nearest 50%. The Predict tab shows this table for any matchup. With few games the estimate is rough; it settles as you play. Games played with a head start count fairly: the head-start points are left out of the rallies won.
+
+## Safety nets
+
+- Every change made through the site is stored in `private.change_log` with a full before-and-after snapshot of the session, so nothing logged is ever lost for good, even after an edit or delete. Restore from the site, or look at it in the Supabase SQL Editor: `select at, actor, action, before, after from private.change_log order by id desc;`
+- Editing a session is refused if someone else changed that session after the edit form was opened.
+- The log form never reopens an edit after a page reload, and an add or edit form left open for 30 minutes closes itself.
 
 ## Backups
 

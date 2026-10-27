@@ -189,12 +189,16 @@
 
     async function fail(res) {
       let msg = res.statusText || 'Request failed';
+      let code = null;
       try {
         const body = await res.json();
         msg = body.message || body.error || msg;
+        code = body.code || null;
       } catch { /* not JSON */ }
       if (/players_name_key/.test(msg)) msg = 'There is already a player with that name.';
-      return new Error(msg);
+      const err = new Error(msg);
+      err.code = code;
+      return err;
     }
 
     async function getAll(table, query) {
@@ -209,9 +213,20 @@
       }
     }
 
+    // Parameters added by database update 004. If the database hasn't had
+    // that update yet, PostgREST can't find the function (PGRST202), so the
+    // call is retried without them.
+    const NEW_PARAMS = ['p_actor', 'p_expected_updated'];
     async function rpc(fn, args) {
-      const res = await fetch(`${url}/rest/v1/rpc/${fn}`, { method: 'POST', headers, body: JSON.stringify(args) });
-      if (!res.ok) throw await fail(res);
+      const post = (body) => fetch(`${url}/rest/v1/rpc/${fn}`, { method: 'POST', headers, body: JSON.stringify(body) });
+      let res = await post(args);
+      if (!res.ok) {
+        const err = await fail(res);
+        if (err.code !== 'PGRST202' || !NEW_PARAMS.some((k) => k in args)) throw err;
+        const legacy = Object.fromEntries(Object.entries(args).filter(([k]) => !NEW_PARAMS.includes(k)));
+        res = await post(legacy);
+        if (!res.ok) throw await fail(res);
+      }
       const text = await res.text();
       return text ? JSON.parse(text) : null;
     }
@@ -228,26 +243,39 @@
         return { players, sessions, attendance, games };
       },
       verify: (code) => rpc('verify_code', { p_code: code }),
-      logSession: (code, x) => rpc('log_session', {
-        p_code: code, p_played_on: x.date, p_slot: x.slot, p_player_ids: x.playerIds, p_games: x.games, p_note: x.note || null,
+      logSession: (code, x, actor) => rpc('log_session', {
+        p_code: code, p_played_on: x.date, p_slot: x.slot, p_player_ids: x.playerIds, p_games: x.games, p_note: x.note || null, p_actor: actor || null,
       }),
-      updateSession: (code, x) => rpc('update_session', {
+      updateSession: (code, x, actor) => rpc('update_session', {
         p_code: code, p_id: x.id, p_played_on: x.date, p_slot: x.slot, p_player_ids: x.playerIds, p_games: x.games, p_note: x.note || null,
+        p_actor: actor || null, p_expected_updated: x.expectedUpdated || null,
       }),
-      deleteGame: (code, id) => rpc('delete_game', { p_code: code, p_id: id }),
-      deleteSession: (code, id) => rpc('delete_session', { p_code: code, p_id: id }),
-      removeAttendance: (code, sessionId, playerId) => rpc('remove_attendance', { p_code: code, p_session_id: sessionId, p_player_id: playerId }),
-      savePlayer: (code, p) => rpc('save_player', {
-        p_code: code, p_id: p.id || null, p_name: p.name, p_subscription_start: p.subscription_start || null, p_active: p.active !== false,
+      deleteGame: (code, id, actor) => rpc('delete_game', { p_code: code, p_id: id, p_actor: actor || null }),
+      deleteSession: (code, id, actor) => rpc('delete_session', { p_code: code, p_id: id, p_actor: actor || null }),
+      removeAttendance: (code, sessionId, playerId, actor) => rpc('remove_attendance', { p_code: code, p_session_id: sessionId, p_player_id: playerId, p_actor: actor || null }),
+      savePlayer: (code, p, actor) => rpc('save_player', {
+        p_code: code, p_id: p.id || null, p_name: p.name, p_subscription_start: p.subscription_start || null, p_active: p.active !== false, p_actor: actor || null,
       }),
+      async listChanges(code, limit = 50) {
+        try {
+          return await rpc('list_changes', { p_code: code, p_limit: limit });
+        } catch (e) {
+          if (e.code === 'PGRST202') throw new Error('The change history needs database update 004 (supabase/004_change_history.sql).');
+          throw e;
+        }
+      },
+      restoreChange: (code, id, actor) => rpc('restore_change', { p_code: code, p_change_id: id, p_actor: actor || null }),
     };
   }
 
-  // Demo mode: same interface, sample data kept in this browser only.
+  // Demo mode: same interface and the same rules as the database functions,
+  // with sample data kept in this browser only.
   function demoBackend() {
     const KEY = 'squash-tracker-demo-v2';
     const CODE = 'demo';
     let db = read() || seedDemo();
+    db.changes = db.changes || [];
+    db.changeSeq = db.changeSeq || 0;
     write();
 
     function read() {
@@ -256,82 +284,161 @@
     function write() { store.set(KEY, JSON.stringify(db)); }
     function check(code) { if (code !== CODE) throw new Error('Wrong group code'); }
     const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2) + Date.now().toString(36));
+    const now = () => new Date().toISOString();
+
+    function snapshot(id) {
+      const s = db.sessions.find((r) => r.id === id);
+      if (!s) return null;
+      return {
+        id: s.id, played_on: s.played_on, slot: s.slot, note: s.note || null, updated_at: s.updated_at || null,
+        attendance: db.attendance.filter((a) => a.session_id === id).map((a) => a.player_id).sort(),
+        games: db.games.filter((g) => g.session_id === id).sort((a, b) => a.id - b.id)
+          .map((g) => ({ a: g.player_a, b: g.player_b, sa: g.score_a, sb: g.score_b, ha: g.start_a || 0, hb: g.start_b || 0 })),
+      };
+    }
+    function logChange(actor, action, sessionId, before, after) {
+      db.changes.push({ id: ++db.changeSeq, at: now(), actor: actor || null, action, session_id: sessionId, before, after });
+    }
+    function fill(id, playerIds, games) {
+      const ids = new Set(playerIds);
+      for (const g of games || []) {
+        db.games.push({ id: ++db.seq, session_id: id, player_a: g.a, player_b: g.b, score_a: g.sa, score_b: g.sb, start_a: g.ha || 0, start_b: g.hb || 0, created_at: now() });
+        ids.add(g.a);
+        ids.add(g.b);
+      }
+      for (const pid of ids) {
+        if (!db.attendance.some((a) => a.session_id === id && a.player_id === pid)) db.attendance.push({ session_id: id, player_id: pid });
+      }
+    }
+    const clear = (id) => {
+      db.games = db.games.filter((g) => g.session_id !== id);
+      db.attendance = db.attendance.filter((a) => a.session_id !== id);
+    };
 
     return {
       demo: true,
       async load() { return clone(db); },
       async verify(code) { return code === CODE; },
-      async logSession(code, x) {
+      async logSession(code, x, actor) {
         check(code);
         let sess = db.sessions.find((r) => r.played_on === x.date && r.slot === x.slot);
+        const before = sess ? snapshot(sess.id) : null;
         if (!sess) {
-          sess = { id: uuid(), played_on: x.date, slot: x.slot, note: x.note || null, created_at: new Date().toISOString() };
+          sess = { id: uuid(), played_on: x.date, slot: x.slot, note: x.note || null, created_at: now() };
           db.sessions.push(sess);
         } else if (x.note) {
           sess.note = x.note;
         }
-        const ids = new Set(x.playerIds);
-        for (const g of x.games) {
-          db.games.push({ id: ++db.seq, session_id: sess.id, player_a: g.a, player_b: g.b, score_a: g.sa, score_b: g.sb, start_a: g.ha || 0, start_b: g.hb || 0, created_at: new Date().toISOString() });
-          ids.add(g.a);
-          ids.add(g.b);
-        }
-        for (const pid of ids) {
-          if (!db.attendance.some((a) => a.session_id === sess.id && a.player_id === pid)) db.attendance.push({ session_id: sess.id, player_id: pid });
-        }
+        sess.updated_at = now();
+        fill(sess.id, x.playerIds, x.games);
+        logChange(actor, before ? 'add' : 'create', sess.id, before, snapshot(sess.id));
         write();
         return sess.id;
       },
-      async updateSession(code, x) {
+      async updateSession(code, x, actor) {
         check(code);
+        const sess = db.sessions.find((r) => r.id === x.id);
+        if (!sess) throw new Error('That session no longer exists.');
+        if (x.expectedUpdated && sess.updated_at && sess.updated_at !== x.expectedUpdated) {
+          throw new Error('This session was changed by someone else after you opened it. Reload the page and try again.');
+        }
         if (db.sessions.some((r) => r.played_on === x.date && r.slot === x.slot && r.id !== x.id)) {
           throw new Error('There is already another session on that date and time slot.');
         }
-        const sess = db.sessions.find((r) => r.id === x.id);
-        if (!sess) throw new Error('That session no longer exists.');
-        Object.assign(sess, { played_on: x.date, slot: x.slot, note: x.note || null });
-        db.games = db.games.filter((g) => g.session_id !== x.id);
-        db.attendance = db.attendance.filter((a) => a.session_id !== x.id);
+        const before = snapshot(x.id);
+        Object.assign(sess, { played_on: x.date, slot: x.slot, note: x.note || null, updated_at: now() });
+        clear(x.id);
+        fill(x.id, x.playerIds, x.games);
+        logChange(actor, 'edit', x.id, before, snapshot(x.id));
         write();
-        return this.logSession(code, x);
+        return x.id;
       },
-      async deleteGame(code, id) {
+      async deleteGame(code, id, actor) {
         check(code);
-        db.games = db.games.filter((g) => g.id !== id);
+        const g = db.games.find((r) => r.id === id);
+        if (!g) return;
+        const before = snapshot(g.session_id);
+        db.games = db.games.filter((r) => r.id !== id);
+        db.sessions.find((r) => r.id === g.session_id).updated_at = now();
+        logChange(actor, 'delete game', g.session_id, before, snapshot(g.session_id));
         write();
       },
-      async deleteSession(code, id) {
+      async deleteSession(code, id, actor) {
         check(code);
+        const before = snapshot(id);
+        if (!before) return;
         db.sessions = db.sessions.filter((r) => r.id !== id);
-        db.games = db.games.filter((g) => g.session_id !== id);
-        db.attendance = db.attendance.filter((a) => a.session_id !== id);
+        clear(id);
+        logChange(actor, 'delete', id, before, null);
         write();
       },
-      async removeAttendance(code, sessionId, playerId) {
+      async removeAttendance(code, sessionId, playerId, actor) {
         check(code);
         if (db.games.some((g) => g.session_id === sessionId && (g.player_a === playerId || g.player_b === playerId))) {
           throw new Error('This player has games in this session. Delete those games first.');
         }
+        const before = snapshot(sessionId);
         db.attendance = db.attendance.filter((a) => !(a.session_id === sessionId && a.player_id === playerId));
+        db.sessions.find((r) => r.id === sessionId).updated_at = now();
+        logChange(actor, 'remove person', sessionId, before, snapshot(sessionId));
         write();
       },
-      async savePlayer(code, p) {
+      async savePlayer(code, p, actor) {
         check(code);
         const name = (p.name || '').trim();
         if (!name || name.length > 40) throw new Error('Names need 1 to 40 characters.');
         if (db.players.some((r) => r.name.toLowerCase() === name.toLowerCase() && r.id !== p.id)) throw new Error('There is already a player with that name.');
         if (p.id) {
-          Object.assign(db.players.find((r) => r.id === p.id), { name, is_subscriber: !!p.subscription_start, subscription_start: p.subscription_start || null, active: p.active !== false });
+          const row = db.players.find((r) => r.id === p.id);
+          const before = clone(row);
+          Object.assign(row, { name, is_subscriber: !!p.subscription_start, subscription_start: p.subscription_start || null, active: p.active !== false });
+          logChange(actor, 'edit player', null, before, clone(row));
           write();
           return p.id;
         }
-        const id = uuid();
-        db.players.push({ id, name, is_subscriber: !!p.subscription_start, subscription_start: p.subscription_start || null, active: true, created_at: new Date().toISOString() });
+        const row = { id: uuid(), name, is_subscriber: !!p.subscription_start, subscription_start: p.subscription_start || null, active: true, created_at: now() };
+        db.players.push(row);
+        logChange(actor, 'add player', null, null, clone(row));
+        write();
+        return row.id;
+      },
+      async listChanges(code, limit = 50) {
+        check(code);
+        return clone(db.changes.slice(-limit).reverse());
+      },
+      async restoreChange(code, changeId, actor) {
+        check(code);
+        const c = db.changes.find((r) => r.id === changeId);
+        if (!c || !c.session_id) throw new Error('There is nothing to restore for that change.');
+        const id = c.session_id;
+        const current = snapshot(id);
+        const snap = c.before;
+        if (!snap) {
+          db.sessions = db.sessions.filter((r) => r.id !== id);
+          clear(id);
+          logChange(actor, 'restore', id, current, null);
+          write();
+          return id;
+        }
+        if (db.sessions.some((r) => r.played_on === snap.played_on && r.slot === snap.slot && r.id !== id)) {
+          throw new Error('Another session now exists on that date and time slot. Delete or move it first.');
+        }
+        let sess = db.sessions.find((r) => r.id === id);
+        if (!sess) {
+          sess = { id, created_at: now() };
+          db.sessions.push(sess);
+        }
+        Object.assign(sess, { played_on: snap.played_on, slot: snap.slot, note: snap.note, updated_at: now() });
+        clear(id);
+        fill(id, snap.attendance, snap.games);
+        logChange(actor, 'restore', id, current, snapshot(id));
         write();
         return id;
       },
       reset() {
         db = seedDemo();
+        db.changes = [];
+        db.changeSeq = 0;
         write();
       },
     };
@@ -818,7 +925,13 @@
 
   const api = CFG.supabaseUrl && CFG.supabaseKey ? supabaseBackend(CFG.supabaseUrl, CFG.supabaseKey) : demoBackend();
   const CODE_KEY = 'squash-tracker-code' + (api.demo ? '-demo' : '');
-  const DRAFT_KEY = 'squash-tracker-draft';
+  const DRAFT_KEY = 'squash-tracker-draft-v2';
+  const ACTOR_KEY = 'squash-tracker-actor';
+  const DRAFT_TTL_MS = 6 * 3600 * 1000;
+  const STALE_FORM_MS = 30 * 60 * 1000;
+  // The old draft could hold "editing session X" forever, which is how a
+  // session got overwritten; it's dropped and never read again.
+  store.del('squash-tracker-draft');
 
   const state = {
     raw: null,
@@ -827,21 +940,32 @@
     code: store.get(CODE_KEY),
     unlocked: false,
     seasonK: null,
-    draft: loadDraft(),
+    actor: store.get(ACTOR_KEY) || '',
+    // The log page always opens on the start screen. `draft` is the form in
+    // progress: { mode: 'new' | 'add' | 'edit', targetId, expectedUpdated,
+    // date, slot, playerIds, games, note }.
+    logStep: 'choose',
+    draft: null,
+    resumable: loadDraft(),
+    choose: null,
+    done: null,
   };
 
+  // Only an unsaved *new* session is kept between visits, and only for a few
+  // hours. Adding to or editing a saved session never survives a reload.
   function loadDraft() {
     try {
       const d = JSON.parse(store.get(DRAFT_KEY));
-      if (d && d.date && d.slot && Array.isArray(d.games)) return d;
+      if (d && d.mode === 'new' && Array.isArray(d.games) && Date.now() - (d.savedAt || 0) < DRAFT_TTL_MS && (d.games.length || d.playerIds.length)) return d;
     } catch { /* ignore */ }
-    return freshDraft();
+    store.del(DRAFT_KEY);
+    return null;
   }
-  function freshDraft() {
-    const date = todayIso();
-    return { date, slot: guessSlot(date), playerIds: [], games: [], note: '' };
+  function saveDraft() {
+    const dr = state.draft;
+    if (dr && dr.mode === 'new') store.set(DRAFT_KEY, JSON.stringify(Object.assign({}, dr, { savedAt: Date.now() })));
+    else store.del(DRAFT_KEY);
   }
-  const saveDraft = () => store.set(DRAFT_KEY, JSON.stringify(state.draft));
 
   async function reload() {
     try {
@@ -888,6 +1012,7 @@
       return true;
     } catch (e) {
       if (/group code/i.test(e.message)) { state.unlocked = false; store.del(CODE_KEY); }
+      if (/changed by someone else/i.test(e.message)) { await reload(); }
       alert(e.message);
       render();
       return false;
@@ -2217,6 +2342,7 @@
       }
       frag.append(sessionCard(sess));
     }
+    if (state.unlocked) frag.append(changesCard());
     frag.append(backup);
     return frag;
   }
@@ -2230,17 +2356,87 @@
     return n ? h('span', { class: 'start-tag', title: `Started at ${n}–0` }, `+${n}`) : null;
   }
 
-  function startEdit(sess) {
+  // ----- Starting a log: new session, add to one, or edit one
+
+  const actorName = () => state.actor || null;
+
+  // A saved session as plain data, in the same shape as the database's change history.
+  function sessionSnapshot(sess) {
     const d = state.d;
-    if (state.draft.games.length && !state.draft.editId && !confirm('The Log form has games that are not saved yet. Replace them with this session?')) return;
-    state.draft = {
-      editId: sess.id, date: sess.played_on, slot: sess.slot, note: sess.note || '',
-      playerIds: [...(d.attBySession.get(sess.id) || [])],
+    return {
+      id: sess.id, played_on: sess.played_on, slot: sess.slot, note: sess.note || null,
+      attendance: [...(d.attBySession.get(sess.id) || [])].sort(),
       games: (d.gamesBySession.get(sess.id) || []).map((g) => ({ a: g.player_a, b: g.player_b, sa: g.score_a, sb: g.score_b, ha: g.start_a || 0, hb: g.start_b || 0 })),
     };
-    saveDraft();
-    location.hash = '#log';
   }
+
+  function openForm(draft) {
+    if (state.draft && state.draft.mode !== 'edit' && state.logStep !== 'done' && state.draft.games.some((g) => g.sa != null || g.sb != null) && !confirm('The Log form has games that are not saved yet. Discard them?')) return false;
+    state.draft = draft;
+    state.draftOpenedAt = Date.now();
+    state.logStep = 'form';
+    state.done = null;
+    saveDraft();
+    if (location.hash !== '#log') location.hash = '#log';
+    else render();
+    window.scrollTo(0, 0);
+    return true;
+  }
+
+  function startNew(date, slot) {
+    return openForm({ mode: 'new', date, slot, playerIds: [], games: [], note: '' });
+  }
+
+  function startAdd(sess) {
+    return openForm({ mode: 'add', targetId: sess.id, date: sess.played_on, slot: sess.slot, playerIds: [], games: [], note: '' });
+  }
+
+  function startEdit(sess) {
+    const snap = sessionSnapshot(sess);
+    return openForm({
+      mode: 'edit', targetId: sess.id, expectedUpdated: sess.updated_at || null,
+      date: sess.played_on, slot: sess.slot, note: sess.note || '',
+      playerIds: snap.attendance.slice(),
+      games: snap.games.map((g) => Object.assign({}, g)),
+    });
+  }
+
+  function closeForm() {
+    state.draft = null;
+    state.logStep = 'choose';
+    saveDraft();
+    render();
+    window.scrollTo(0, 0);
+  }
+
+  // What changes between two snapshots of a session.
+  function diffSessions(before, after) {
+    const key = (g) => [g.a, g.b, g.sa, g.sb, g.ha || 0, g.hb || 0].join('|');
+    const left = new Map();
+    for (const g of (before && before.games) || []) left.set(key(g), [...(left.get(key(g)) || []), g]);
+    const added = [];
+    let kept = 0;
+    for (const g of (after && after.games) || []) {
+      const same = left.get(key(g));
+      if (same && same.length) { same.pop(); kept++; } else added.push(g);
+    }
+    const removed = [...left.values()].flat();
+    const was = new Set((before && before.attendance) || []);
+    const now = new Set((after && after.attendance) || []);
+    return {
+      moved: !!(before && after && (before.played_on !== after.played_on || before.slot !== after.slot)),
+      peopleAdded: [...now].filter((x) => !was.has(x)),
+      peopleRemoved: [...was].filter((x) => !now.has(x)),
+      kept, added, removed,
+    };
+  }
+
+  function describeGame(g) {
+    const side = (pid, start) => nameOf(pid) + (start ? ` (+${start})` : '');
+    return `${side(g.a, g.ha)} ${g.sa}–${g.sb} ${side(g.b, g.hb)}`;
+  }
+
+  const sessionLabel = (date, slot) => `${fmtDay(date)} · ${SLOTS[slot].label}`;
 
   function sessionCard(sess) {
     const d = state.d;
@@ -2252,7 +2448,9 @@
         h('h3', null, fmtDay(sess.played_on)),
         h('span', { class: 'pill' }, SLOTS[sess.slot].label),
         h('span', { class: 'muted small' }, `${fmtEuro(CFG.slotValues[sess.slot] || 0)} per subscriber`),
-        edit ? h('button', { class: 'btn btn-small', onclick: () => startEdit(sess) }, 'Edit') : null),
+        edit ? h('span', { class: 'actions' },
+          h('button', { class: 'btn btn-small', onclick: () => startAdd(sess) }, 'Add games'),
+          h('button', { class: 'btn btn-small btn-ghost', onclick: () => startEdit(sess) }, 'Edit')) : null),
       sess.note ? h('p', { class: 'muted small', style: 'margin:6px 0 0' }, sess.note) : null,
       h('div', { class: 'people' }, att.map((pid) => h('span', { class: 'person' }, dotFor(pid), nameOf(pid)))),
       games.length ? h('ul', { class: 'game-list' }, games.map((g) => {
@@ -2362,122 +2560,156 @@
   function viewLog() {
     const frag = h('div');
     frag.append(h('div', { class: 'view-head' }, h('h1', null, 'Log'),
-      state.unlocked ? h('a', { class: 'small', href: '#log', onclick: (e) => { e.preventDefault(); document.getElementById('players-card')?.scrollIntoView({ behavior: 'smooth' }); } }, 'Jump to players') : null,
+      state.unlocked && state.actor ? h('span', { class: 'muted small' }, 'Logging as ', h('strong', null, state.actor), ' · ',
+        h('a', { href: '#log', onclick: (e) => { e.preventDefault(); state.actor = ''; store.del(ACTOR_KEY); render(); } }, 'change')) : null,
       state.unlocked ? h('button', { class: 'btn btn-small btn-ghost', onclick: lock }, 'Lock editing') : null));
     if (!state.unlocked) {
       frag.append(unlockCard());
       return frag;
     }
-    const saved = state.justSaved && state.d.sessions.find((x) => x.id === state.justSaved);
-    if (saved) {
-      frag.append(h('section', { class: 'card share-prompt' },
-        h('div', { class: 'card-head' },
-          h('h2', null, `Saved · ${fmtDay(saved.played_on)}`),
-          h('button', { class: 'btn btn-small btn-ghost', onclick: () => { state.justSaved = null; render(); } }, 'Close')),
-        h('p', { class: 'sub' }, 'Let the group know how it went. Adding more games? Save them first, then share.'),
-        h('div', { class: 'share-row' }, shareButtons(() => sessionSummary(state.d.sessions.find((x) => x.id === saved.id) || saved)))));
+    if (!state.actor) {
+      frag.append(actorCard());
+      return frag;
     }
-    frag.append(sessionForm());
-    frag.append(playersCard());
+    // An add or edit form left open (phones keep tabs for days) closes after
+    // 30 minutes, so nobody later types a new session into an old one.
+    if (state.draft && state.draft.mode !== 'new' && Date.now() - (state.draftOpenedAt || 0) > STALE_FORM_MS) {
+      state.draft = null;
+      state.logStep = 'choose';
+      frag.append(h('p', { class: 'notice' }, 'An unfinished change to a saved session was closed because it had been open for more than 30 minutes. Nothing was saved.'));
+    }
+    const target = state.draft && state.draft.targetId ? state.d.sessions.find((x) => x.id === state.draft.targetId) : null;
+    if (state.draft && state.draft.targetId && !target) {
+      // The session was deleted meanwhile.
+      state.draft = null;
+      state.logStep = 'choose';
+    }
+    if (state.logStep === 'done' && state.done) frag.append(doneCard());
+    else if (state.logStep === 'review' && state.draft) frag.append(reviewCard());
+    else if (state.logStep === 'form' && state.draft) frag.append(sessionForm());
+    else {
+      state.logStep = 'choose';
+      frag.append(chooseCard());
+      frag.append(changesCard());
+      frag.append(playersCard());
+    }
     return frag;
   }
 
-  function unlockCard() {
-    const input = h('input', { type: 'password', autocomplete: 'off', placeholder: 'Group code', 'aria-label': 'Group code', value: '' });
-    const err = h('p', { class: 'form-error', hidden: true });
-    const btn = h('button', { class: 'btn btn-primary', type: 'submit' }, 'Unlock');
-    const form = h('form', {
-      class: 'unlock',
-      onsubmit: async (e) => {
-        e.preventDefault();
-        btn.disabled = true;
-        err.hidden = true;
-        try {
-          if (await unlock(input.value.trim())) { render(); return; }
-          err.textContent = 'That code is not right.';
-        } catch (ex) {
-          err.textContent = ex.message;
-        }
-        err.hidden = false;
-        btn.disabled = false;
-      },
-    }, input, btn);
-    return h('section', { class: 'card' },
-      h('h2', null, 'Enter the group code'),
-      h('p', { class: 'sub' }, 'Anyone can look; you need the code to log sessions and to add or edit players. This browser remembers it.'),
-      err, form);
-  }
-
-  // "Sam wins 72% of games like this" for the log form, from the prediction model.
-  function winChanceNote(a, b, ha, hb, lead = '') {
-    const model = getModel();
-    if (!model.games || !model.idx.has(a) || !model.idx.has(b)) return null;
-    const q = predict(model, a, b, ha, hb).mid.game;
-    const fav = q >= 0.5 ? a : b;
-    return h('span', { class: 'muted' }, `· ${lead}${nameOf(fav)} wins ${pct(Math.max(q, 1 - q))} of games like this`);
-  }
-
-  // Suggested head start for a game between a and b, from the current ratings.
-  // The head start that makes a game closest to 50/50, according to the
-  // prediction model: for the weaker player, try starting at 0–0, 1–0, … 9–0
-  // and pick the start where their chance of winning the game is nearest 50%.
-  function suggestHandicap(a, b) {
+  // Asked once per device, so the change history shows who did what.
+  function actorCard() {
     const d = state.d;
-    const model = getModel();
-    if (!model.games || !model.idx.has(a) || !model.idx.has(b)) return null;
-    const aLevel = predict(model, a, b).mid.game;
-    const who = aLevel < 0.5 ? a : b;
-    const chances = [];
-    for (let pts = 0; pts <= MAX_HANDICAP; pts++) {
-      chances.push(who === a ? predict(model, a, b, pts, 0).mid.game : 1 - predict(model, a, b, 0, pts).mid.game);
-    }
-    let pts = 0;
-    chances.forEach((c, i) => { if (Math.abs(c - 0.5) < Math.abs(chances[pts] - 0.5) - 1e-9) pts = i; });
-    const games = Math.min(d.stats.get(a)?.games || 0, d.stats.get(b)?.games || 0);
-    return { pts, who, chances, settling: games < PROVISIONAL_GAMES };
+    let other = '';
+    const otherInput = h('input', { type: 'text', maxlength: 40, placeholder: 'Your name', 'aria-label': 'Your name', oninput: (e) => { other = e.target.value; } });
+    const choose = (name) => {
+      const n = (name || '').trim();
+      if (!n) return;
+      state.actor = n;
+      store.set(ACTOR_KEY, n);
+      render();
+    };
+    return h('section', { class: 'card' },
+      h('h2', null, 'Who\'s logging?'),
+      h('p', { class: 'sub' }, 'So the change history shows who added or changed what. This device remembers it.'),
+      h('div', { class: 'choices', style: 'margin-bottom:12px' }, d.players.filter((p) => p.active !== false).map((p) => h('button', { type: 'button', class: 'btn', onclick: () => choose(p.name) }, dotFor(p.id), ' ', p.name))),
+      h('form', { class: 'unlock', onsubmit: (e) => { e.preventDefault(); choose(other); } }, otherInput, h('button', { class: 'btn', type: 'submit' }, 'Someone else')));
   }
 
+  // Step 1: what are you logging?
+  function chooseCard() {
+    const d = state.d;
+    if (!d.players.length) {
+      return h('section', { class: 'card' }, h('h2', null, 'Log a session'), h('p', { class: 'empty' }, 'Add players below first.'));
+    }
+    const ch = state.choose || (state.choose = { date: todayIso(), slot: guessSlot(todayIso()) });
+    const existing = d.sessions.find((x) => x.played_on === ch.date && x.slot === ch.slot);
+    const summary = (sess) => {
+      const people = [...(d.attBySession.get(sess.id) || [])].map(nameOf).sort();
+      const n = (d.gamesBySession.get(sess.id) || []).length;
+      return `${people.join(', ') || 'nobody yet'} · ${n} game${n === 1 ? '' : 's'}`;
+    };
+
+    const dateInput = h('input', {
+      type: 'date', value: ch.date, max: todayIso(), 'aria-label': 'Date',
+      onchange: (e) => { ch.date = e.target.value || todayIso(); ch.slot = guessSlot(ch.date); render(); },
+    });
+    const slotChoices = h('div', { class: 'choices', role: 'radiogroup', 'aria-label': 'Time slot' },
+      Object.entries(SLOTS).map(([key, sl]) => h('label', { class: 'choice' },
+        h('input', { type: 'radio', name: 'choose-slot', value: key, checked: ch.slot === key, onchange: () => { ch.slot = key; render(); } }),
+        h('span', null, h('span', { class: 'choice-label' }, sl.label), h('small', null, `${sl.hint} · ${fmtEuro(CFG.slotValues[key])}`)))));
+
+    const recent = d.sessions.slice(-4).reverse();
+    const r = state.resumable;
+    return h('section', { class: 'card' },
+      h('h2', null, 'What are you logging?'),
+      r ? h('div', { class: 'notice resume' },
+        h('span', null, `You have an unsaved new session for ${sessionLabel(r.date, r.slot)} with ${r.games.length} game${r.games.length === 1 ? '' : 's'}.`),
+        h('span', { class: 'actions' },
+          h('button', { class: 'btn btn-small btn-primary', onclick: () => { state.resumable = null; openForm(r); } }, 'Continue'),
+          h('button', { class: 'btn btn-small btn-ghost', onclick: () => { state.resumable = null; store.del(DRAFT_KEY); render(); } }, 'Discard'))) : null,
+      h('div', { class: 'choose-block' },
+        h('h3', null, 'A new session'),
+        h('div', { class: 'field' }, h('span', { class: 'label' }, 'Date'), dateInput),
+        h('div', { class: 'field' }, h('span', { class: 'label' }, 'Time slot'), slotChoices),
+        existing
+          ? h('div', { class: 'notice clash' },
+            h('p', { style: 'margin:0 0 8px' }, h('strong', null, `There's already a session on ${sessionLabel(existing.played_on, existing.slot)}`), ` (${summary(existing)}).`),
+            h('div', { class: 'actions' },
+              h('button', { class: 'btn btn-primary', onclick: () => startAdd(existing) }, 'Add games to it'),
+              h('button', { class: 'btn', onclick: () => startEdit(existing) }, 'Edit it')))
+          : h('button', { class: 'btn btn-primary', onclick: () => startNew(ch.date, ch.slot) }, `Start a new session: ${sessionLabel(ch.date, ch.slot)}`)),
+      recent.length ? h('div', { class: 'choose-block' },
+        h('h3', null, 'Or a session that\'s already logged'),
+        h('ul', { class: 'recent-list' }, recent.map((sess) => h('li', null,
+          h('div', null, h('strong', null, sessionLabel(sess.played_on, sess.slot)), h('div', { class: 'muted small' }, summary(sess))),
+          h('span', { class: 'actions' },
+            h('button', { class: 'btn btn-small', onclick: () => startAdd(sess) }, 'Add games'),
+            h('button', { class: 'btn btn-small btn-ghost', onclick: () => startEdit(sess) }, 'Edit'))))),
+        h('p', { class: 'muted small', style: 'margin:8px 0 0' }, 'Older sessions: use Add games or Edit on the ', h('a', { href: '#history' }, 'History'), ' page.')) : null);
+  }
+
+  // The coloured banner that says which session the form writes to.
+  function modeBanner(dr, target) {
+    const label = sessionLabel(dr.mode === 'edit' && target ? target.played_on : dr.date, dr.mode === 'edit' && target ? target.slot : dr.slot);
+    const text = {
+      new: ['New session', label, 'Saving creates this session.'],
+      add: ['Adding to', label, 'New people and games are added. Nothing that\'s already saved changes.'],
+      edit: ['Editing', label, 'You\'re changing a saved session. Before anything is saved you\'ll see exactly what changes.'],
+    }[dr.mode];
+    return h('div', { class: `mode-banner mode-${dr.mode}` },
+      h('div', null, h('span', { class: 'mode-kind' }, text[0]), ' ', h('strong', null, text[1])),
+      h('div', { class: 'small' }, text[2]),
+      h('button', { type: 'button', class: 'btn btn-small btn-ghost', onclick: () => {
+        if (dr.games.some((g) => g.sa != null || g.sb != null) && dr.mode !== 'edit' && !confirm('Discard the games you entered?')) return;
+        closeForm();
+      } }, dr.mode === 'edit' ? 'Cancel editing' : 'Change'));
+  }
+
+  // Step 2: who was there and the games.
   function sessionForm() {
     const d = state.d;
     const dr = state.draft;
-    const editing = dr.editId ? d.sessions.find((x) => x.id === dr.editId) : null;
-    if (dr.editId && !editing) {
-      state.draft = freshDraft();
-      saveDraft();
-      return sessionForm();
-    }
-    const active = d.players.filter((p) => p.active !== false || dr.playerIds.includes(p.id) || dr.games.some((g) => g.a === p.id || g.b === p.id));
+    const target = dr.targetId ? d.sessions.find((x) => x.id === dr.targetId) : null;
+    const already = dr.mode === 'add' && target ? sessionSnapshot(target) : null;
+    const alreadyPeople = new Set(already ? already.attendance : []);
+    const active = d.players.filter((p) => p.active !== false || dr.playerIds.includes(p.id) || alreadyPeople.has(p.id) || dr.games.some((g) => g.a === p.id || g.b === p.id));
     const err = h('p', { class: 'form-error', hidden: true });
-
-    if (!active.length) {
-      return h('section', { class: 'card' }, h('h2', null, 'Log a session'), h('p', { class: 'empty' }, 'Add players below first.'));
-    }
-
-    const clash = d.sessions.find((x) => x.played_on === dr.date && x.slot === dr.slot && x.id !== dr.editId);
     const update = (fn) => { fn(); saveDraft(); render(); };
-    const leaveEdit = (hash) => { state.draft = freshDraft(); saveDraft(); location.hash = hash; render(); };
-
-    const dateInput = h('input', {
-      type: 'date', id: 'f-date', value: dr.date, max: todayIso(), required: true,
-      onchange: (e) => update(() => { dr.date = e.target.value || todayIso(); if (!dr.editId) dr.slot = guessSlot(dr.date); }),
-    });
-
-    const slotChoices = h('div', { class: 'choices', role: 'radiogroup', 'aria-label': 'Time slot' },
-      Object.entries(SLOTS).map(([key, sl]) => h('label', { class: 'choice' },
-        h('input', { type: 'radio', name: 'slot', value: key, checked: dr.slot === key, onchange: () => update(() => { dr.slot = key; }) }),
-        h('span', null, h('span', { class: 'choice-label' }, sl.label), h('small', null, `${sl.hint} · ${fmtEuro(CFG.slotValues[key])}`)))));
 
     const inGames = new Set(dr.games.flatMap((g) => [g.a, g.b]).filter(Boolean));
-    const peopleChoices = h('div', { class: 'choices' }, active.map((p) => h('label', { class: 'choice', title: inGames.has(p.id) ? 'Plays in a game below' : null },
-      h('input', {
-        type: 'checkbox', checked: dr.playerIds.includes(p.id) || inGames.has(p.id), disabled: inGames.has(p.id),
-        onchange: (e) => update(() => {
-          dr.playerIds = e.target.checked ? [...new Set([...dr.playerIds, p.id])] : dr.playerIds.filter((x) => x !== p.id);
+    const peopleChoices = h('div', { class: 'choices' }, active.map((p) => {
+      const fixed = alreadyPeople.has(p.id);
+      return h('label', { class: 'choice', title: fixed ? 'Already in this session' : inGames.has(p.id) ? 'Plays in a game below' : null },
+        h('input', {
+          type: 'checkbox', checked: fixed || dr.playerIds.includes(p.id) || inGames.has(p.id), disabled: fixed || inGames.has(p.id),
+          onchange: (e) => update(() => {
+            dr.playerIds = e.target.checked ? [...new Set([...dr.playerIds, p.id])] : dr.playerIds.filter((x) => x !== p.id);
+          }),
         }),
-      }),
-      h('span', null, dotFor(p.id), p.name, subStart(p) ? h('small', null, 'sub') : null))));
+        h('span', null, dotFor(p.id), p.name, subStart(p) ? h('small', null, 'sub') : null));
+    }));
 
-    const here = new Set([...dr.playerIds, ...inGames]);
+    const here = new Set([...alreadyPeople, ...dr.playerIds, ...inGames]);
     const options = active.slice().sort((a, b) => (here.has(b.id) ? 1 : 0) - (here.has(a.id) ? 1 : 0));
     const playerSelect = (value, onchange, cls, labelText) => h('select', { class: cls, 'aria-label': labelText, onchange },
       h('option', { value: '' }, 'Player…'),
@@ -2545,80 +2777,307 @@
       dr.games.push({ a: prev ? prev.a : ids[0] || null, b: prev ? prev.b : ids[1] || null, sa: null, sb: null, ha: prev ? prev.ha || 0 : 0, hb: prev ? prev.hb || 0 : 0 });
     });
 
-    const note = h('input', { type: 'text', maxlength: 200, value: dr.note || '', placeholder: 'Optional', oninput: (e) => { dr.note = e.target.value; saveDraft(); } });
+    // Moving a session to another date or slot is only possible while editing.
+    const whenFields = dr.mode === 'edit' ? [
+      h('div', { class: 'field' }, h('label', { for: 'f-date' }, 'Date'),
+        h('input', { type: 'date', id: 'f-date', value: dr.date, max: todayIso(), onchange: (e) => update(() => { dr.date = e.target.value || dr.date; }) })),
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Time slot'),
+        h('div', { class: 'choices', role: 'radiogroup', 'aria-label': 'Time slot' }, Object.entries(SLOTS).map(([key, sl]) => h('label', { class: 'choice' },
+          h('input', { type: 'radio', name: 'slot', value: key, checked: dr.slot === key, onchange: () => update(() => { dr.slot = key; }) }),
+          h('span', null, h('span', { class: 'choice-label' }, sl.label)))))),
+    ] : [];
 
-    const saveBtn = h('button', { type: 'submit', class: 'btn btn-primary' },
-      editing ? 'Save changes' : clash ? 'Add to this session' : dr.games.length ? 'Save session' : 'Save visit');
+    const alreadyBlock = already ? h('div', { class: 'field already' },
+      h('span', { class: 'label' }, 'Already saved in this session'),
+      already.games.length
+        ? h('ul', { class: 'game-list compact' }, already.games.map((g) => h('li', null, describeGame(g))))
+        : h('p', { class: 'muted small', style: 'margin:0' }, 'No games yet.')) : null;
 
     const form = h('form', {
-      onsubmit: async (e) => {
+      onsubmit: (e) => {
         e.preventDefault();
-        const problem = validateDraft(dr) || (editing && clash ? 'Another session already exists on this date and time slot. Pick a different one, or delete one of the two.' : null);
+        const problem = validateDraft(dr);
         if (problem) {
           err.textContent = problem;
           err.hidden = false;
           err.scrollIntoView({ block: 'center', behavior: 'smooth' });
           return;
         }
-        saveBtn.disabled = true;
-        const payload = {
-          id: dr.editId, date: dr.date, slot: dr.slot, note: (dr.note || '').trim(),
-          playerIds: [...new Set([...dr.playerIds, ...dr.games.flatMap((g) => [g.a, g.b])])],
-          games: dr.games.map((g) => ({ a: g.a, b: g.b, sa: g.sa, sb: g.sb, ha: g.ha || 0, hb: g.hb || 0 })),
-        };
-        const n = payload.games.length;
-        if (editing) {
-          const ok = await act(() => api.updateSession(state.code, payload), 'Session updated');
-          if (ok) { state.focusedSession = null; leaveEdit('#history/' + encodeURIComponent(payload.id)); }
-          else saveBtn.disabled = false;
-          return;
-        }
-        const ok = await act(() => api.logSession(state.code, payload), n ? `Saved ${n} game${n === 1 ? '' : 's'}` : 'Visit saved');
-        if (ok) {
-          // Keep date, slot and who's there so the next batch of games is quick to add.
-          state.draft = { date: dr.date, slot: dr.slot, playerIds: payload.playerIds, games: [], note: '' };
-          state.justSaved = state.d.sessions.find((x) => x.played_on === dr.date && x.slot === dr.slot)?.id || null;
-          saveDraft();
-          render();
-          window.scrollTo(0, 0);
-        } else {
-          saveBtn.disabled = false;
-        }
+        state.logStep = 'review';
+        render();
+        window.scrollTo(0, 0);
       },
     },
-    h('div', { class: 'field' }, h('label', { for: 'f-date' }, 'Date'), dateInput),
-    h('div', { class: 'field' }, h('span', { class: 'label' }, 'Time slot'), slotChoices),
-    clash && !editing ? h('p', { class: 'notice' },
-      `There is already a session on this date and slot (${(d.gamesBySession.get(clash.id) || []).length} games). Saving adds to it, so the visit isn't counted twice. `,
-      h('a', { href: '#log', onclick: (e) => { e.preventDefault(); startEdit(clash); render(); } }, 'Edit that session instead')) : null,
-    clash && editing ? h('p', { class: 'notice form-error' }, 'Another session already exists on this date and time slot.') : null,
-    h('div', { class: 'field' }, h('span', { class: 'label' }, 'Who was there? ', h('span', { class: 'hint' }, 'Counts towards break-even for subscribers.')), peopleChoices),
+    ...whenFields,
+    alreadyBlock,
+    h('div', { class: 'field' }, h('span', { class: 'label' }, dr.mode === 'add' ? 'Who else was there? ' : 'Who was there? ', h('span', { class: 'hint' }, 'Counts towards break-even for subscribers.')), peopleChoices),
     h('div', { class: 'field' },
-      h('span', { class: 'label' }, 'Games ', h('span', { class: 'hint' }, 'Optional. Don\'t remember the scores? Just save the visit.')),
+      h('span', { class: 'label' }, dr.mode === 'add' ? 'New games ' : 'Games ', h('span', { class: 'hint' }, 'Optional. Don\'t remember the scores? Just save the visit.')),
       h('p', { class: 'notice score-rule' }, h('strong', null, 'One row per game. '), 'Played with a head start? Record who had it and what they started on, and enter the final score with the head start included. For example: started at 4–0 and won 11–9 → enter 11–9 with a 4–0 head start. The site takes the head start off again, so only rallies actually won count. Leaving the head start out, or entering only the points won after it, skews the ratings.'),
       rows,
       h('div', null, h('button', { type: 'button', class: 'btn', onclick: addGame }, dr.games.length ? '+ Another game' : '+ Add a game'))),
-    h('div', { class: 'field' }, h('label', null, 'Note'), note),
+    dr.mode !== 'add' ? h('div', { class: 'field' }, h('label', null, 'Note'),
+      h('input', { type: 'text', maxlength: 200, value: dr.note || '', placeholder: 'Optional', oninput: (e) => { dr.note = e.target.value; saveDraft(); } })) : null,
     err,
-    editing
-      ? h('div', { class: 'actions' }, saveBtn,
-        h('button', { type: 'button', class: 'btn btn-ghost', onclick: () => leaveEdit('#history') }, 'Cancel'),
-        h('button', {
-          type: 'button', class: 'btn btn-ghost btn-danger', style: 'margin-left:auto',
-          onclick: async () => {
-            if (!confirm(`Delete the whole session on ${fmtDay(editing.played_on)}, including its games?`)) return;
-            if (await act(() => api.deleteSession(state.code, editing.id), 'Session deleted')) leaveEdit('#history');
-          },
-        }, 'Delete session'))
-      : h('div', { class: 'actions' }, saveBtn,
-        h('button', { type: 'button', class: 'btn btn-ghost', onclick: () => { if (confirm('Clear this form?')) update(() => { state.draft = freshDraft(); }); } }, 'Clear')));
+    h('div', { class: 'actions' },
+      h('button', { type: 'submit', class: 'btn btn-primary' }, 'Check and save'),
+      h('button', { type: 'button', class: 'btn btn-ghost', onclick: () => {
+        if (dr.games.some((g) => g.sa != null || g.sb != null) && dr.mode !== 'edit' && !confirm('Discard the games you entered?')) return;
+        closeForm();
+      } }, 'Cancel'),
+      dr.mode === 'edit' && target ? h('button', {
+        type: 'button', class: 'btn btn-ghost btn-danger', style: 'margin-left:auto',
+        onclick: async () => {
+          if (!confirm(`Delete the whole session on ${fmtDay(target.played_on)}, including its ${(d.gamesBySession.get(target.id) || []).length} games? You can undo this from the change history.`)) return;
+          const snap = sessionSnapshot(target);
+          if (await act(() => api.deleteSession(state.code, target.id, actorName()), 'Session deleted')) {
+            state.done = { sessionId: target.id, mode: 'delete', before: snap };
+            state.draft = null;
+            state.logStep = 'done';
+            render();
+          }
+        },
+      }, 'Delete session') : null));
 
-    return h('section', { class: 'card' + (editing ? ' editing' : '') },
-      h('h2', null, editing ? `Edit session · ${fmtDay(editing.played_on)}` : 'Log a session'),
-      h('p', { class: 'sub' }, editing
-        ? 'Change the date, who was there or any game, then save. Saving replaces this session\'s attendance and games.'
-        : 'Log the visit and any games. To change a session later, use Edit on the History page.'),
-      form);
+    return h('section', { class: 'card log-card' }, modeBanner(dr, target), form);
+  }
+
+  // Step 3: check exactly what will be saved.
+  function reviewCard() {
+    const d = state.d;
+    const dr = state.draft;
+    const target = dr.targetId ? d.sessions.find((x) => x.id === dr.targetId) : null;
+    const games = dr.games.map((g) => ({ a: g.a, b: g.b, sa: g.sa, sb: g.sb, ha: g.ha || 0, hb: g.hb || 0 }));
+    const people = [...new Set([...dr.playerIds, ...games.flatMap((g) => [g.a, g.b])])];
+    const list = (items, cls) => h('ul', { class: 'review-list ' + (cls || '') }, items.map((t) => h('li', null, t)));
+    const names = (ids) => ids.map(nameOf).sort().join(', ');
+    const body = [];
+    let confirmText = 'Save';
+    let warn = null;
+    let nothing = false;
+
+    if (dr.mode === 'new') {
+      const clash = d.sessions.find((x) => x.played_on === dr.date && x.slot === dr.slot);
+      body.push(h('p', null, 'Create a new session on ', h('strong', null, sessionLabel(dr.date, dr.slot)), '.'));
+      if (clash) body.push(h('p', { class: 'notice' }, 'Someone logged this date and slot in the meantime, so your people and games will be added to that session.'));
+      body.push(h('p', null, h('strong', null, 'People: '), names(people) || 'nobody'));
+      body.push(games.length ? h('div', null, h('strong', null, `${games.length} game${games.length === 1 ? '' : 's'}:`), list(games.map(describeGame), 'added')) : h('p', { class: 'muted' }, 'No games (a visit without scores).'));
+      confirmText = 'Save session';
+    } else if (dr.mode === 'add') {
+      const before = sessionSnapshot(target);
+      const newPeople = people.filter((p) => !before.attendance.includes(p));
+      body.push(h('p', null, 'Add to ', h('strong', null, sessionLabel(target.played_on, target.slot)), `, which has ${before.games.length} game${before.games.length === 1 ? '' : 's'} already. Nothing already saved changes.`));
+      if (newPeople.length) body.push(h('p', null, h('strong', null, 'New people: '), names(newPeople)));
+      if (games.length) body.push(h('div', null, h('strong', null, `${games.length} new game${games.length === 1 ? '' : 's'}:`), list(games.map(describeGame), 'added')));
+      nothing = !newPeople.length && !games.length;
+      confirmText = 'Add to session';
+    } else {
+      const before = sessionSnapshot(target);
+      const after = { played_on: dr.date, slot: dr.slot, attendance: people, games };
+      const diff = diffSessions(before, after);
+      body.push(h('p', null, 'Change ', h('strong', null, sessionLabel(target.played_on, target.slot)), ':'));
+      const lines = [];
+      if (diff.moved) lines.push(h('li', { class: 'changed' }, `Move to ${sessionLabel(dr.date, dr.slot)}`));
+      if (diff.peopleRemoved.length) lines.push(h('li', { class: 'removed' }, `Remove ${names(diff.peopleRemoved)}`));
+      if (diff.peopleAdded.length) lines.push(h('li', { class: 'added' }, `Add ${names(diff.peopleAdded)}`));
+      for (const g of diff.removed) lines.push(h('li', { class: 'removed' }, `Remove game ${describeGame(g)}`));
+      for (const g of diff.added) lines.push(h('li', { class: 'added' }, `Add game ${describeGame(g)}`));
+      if ((dr.note || '') !== (target.note || '')) lines.push(h('li', { class: 'changed' }, 'Change the note'));
+      nothing = !lines.length;
+      if (lines.length) body.push(h('ul', { class: 'review-list' }, lines));
+      if (diff.kept) body.push(h('p', { class: 'muted small' }, `${diff.kept} game${diff.kept === 1 ? '' : 's'} stay${diff.kept === 1 ? 's' : ''} as they are.`));
+      if (diff.removed.length || diff.peopleRemoved.length) {
+        warn = h('p', { class: 'notice warn' }, h('strong', null, `This removes ${[diff.removed.length ? `${diff.removed.length} game${diff.removed.length === 1 ? '' : 's'}` : '', diff.peopleRemoved.length ? `${diff.peopleRemoved.length} ${diff.peopleRemoved.length === 1 ? 'person' : 'people'}` : ''].filter(Boolean).join(' and ')} from this session. `), 'Only do this if they really weren\'t part of it. To log a different day, cancel and start a new session instead.');
+      }
+      confirmText = diff.removed.length ? `Yes, remove ${diff.removed.length} game${diff.removed.length === 1 ? '' : 's'} and save` : 'Save changes';
+    }
+    if (nothing) body.push(h('p', { class: 'muted' }, 'There\'s nothing to save yet.'));
+
+    const saveBtn = h('button', { type: 'button', class: 'btn btn-primary' + (warn ? ' btn-warn' : ''), disabled: nothing }, confirmText);
+    saveBtn.addEventListener('click', async () => {
+      saveBtn.disabled = true;
+      const payload = {
+        id: dr.targetId, date: dr.date, slot: dr.slot, note: dr.mode === 'add' ? '' : (dr.note || '').trim(),
+        playerIds: dr.mode === 'add' ? [...new Set([...sessionSnapshot(target).attendance, ...people])] : people,
+        games, expectedUpdated: dr.expectedUpdated || null,
+      };
+      const before = target ? sessionSnapshot(target) : null;
+      let savedId = null;
+      const ok = await act(async () => {
+        savedId = dr.mode === 'edit'
+          ? await api.updateSession(state.code, payload, actorName())
+          : await api.logSession(state.code, payload, actorName());
+      }, dr.mode === 'edit' ? 'Changes saved' : games.length ? `Saved ${games.length} game${games.length === 1 ? '' : 's'}` : 'Visit saved');
+      if (!ok) { saveBtn.disabled = false; return; }
+      state.done = { sessionId: savedId || dr.targetId, mode: dr.mode, before };
+      state.draft = null;
+      state.logStep = 'done';
+      saveDraft();
+      render();
+      window.scrollTo(0, 0);
+    });
+
+    return h('section', { class: 'card log-card' },
+      modeBanner(dr, target),
+      h('h2', { style: 'margin-top:14px' }, 'Check before saving'),
+      ...body,
+      warn,
+      h('div', { class: 'actions', style: 'margin-top:14px' },
+        saveBtn,
+        h('button', { type: 'button', class: 'btn', onclick: () => { state.logStep = 'form'; render(); } }, 'Back to the form')));
+  }
+
+  // Step 4: saved. Share, undo, or carry on.
+  function doneCard() {
+    const d = state.d;
+    const done = state.done;
+    const sess = d.sessions.find((x) => x.id === done.sessionId);
+    const undo = h('button', { type: 'button', class: 'btn btn-ghost' }, 'Undo');
+    undo.addEventListener('click', async () => {
+      if (!confirm(done.mode === 'delete' ? 'Bring the deleted session back?' : 'Undo this save? The session goes back to how it was just before.')) return;
+      undo.disabled = true;
+      const ok = await act(async () => {
+        const changes = await api.listChanges(state.code, 20);
+        const last = changes.find((c) => c.session_id === done.sessionId);
+        if (!last) throw new Error('Could not find this change in the history.');
+        await api.restoreChange(state.code, last.id, actorName());
+      }, 'Undone');
+      if (ok) {
+        state.done = null;
+        state.logStep = 'choose';
+        render();
+      } else {
+        undo.disabled = false;
+      }
+    });
+    if (done.mode === 'delete') {
+      return h('section', { class: 'card' },
+        h('h2', null, `Deleted ${sessionLabel(done.before.played_on, done.before.slot)}`),
+        h('div', { class: 'actions' }, undo, h('button', { class: 'btn btn-primary', onclick: () => { state.done = null; state.logStep = 'choose'; render(); } }, 'Log something else')));
+    }
+    if (!sess) {
+      state.logStep = 'choose';
+      return chooseCard();
+    }
+    const n = (d.gamesBySession.get(sess.id) || []).length;
+    return h('section', { class: 'card share-prompt' },
+      h('h2', null, `Saved ✓ ${sessionLabel(sess.played_on, sess.slot)}`),
+      h('p', { class: 'sub' }, `${[...(d.attBySession.get(sess.id) || [])].map(nameOf).sort().join(', ')} · ${n} game${n === 1 ? '' : 's'} in this session now.`),
+      h('div', { class: 'share-row' }, shareButtons(() => sessionSummary(sess))),
+      h('div', { class: 'actions', style: 'margin-top:12px' },
+        h('button', { class: 'btn btn-primary', onclick: () => startAdd(sess) }, 'Add more games to this session'),
+        h('button', { class: 'btn', onclick: () => { state.done = null; state.logStep = 'choose'; render(); } }, 'Log another session'),
+        h('a', { class: 'btn btn-ghost', href: '#history/' + encodeURIComponent(sess.id), style: 'text-decoration:none' }, 'See it in History'),
+        undo));
+  }
+
+  // Recent changes, with a way to put any session back how it was.
+  function changesCard() {
+    const card = h('section', { class: 'card', id: 'changes' },
+      h('div', { class: 'card-head' }, h('h2', null, 'Recent changes'),
+        h('button', { class: 'btn btn-small', onclick: () => loadChanges(true) }, state.changes ? 'Refresh' : 'Show')),
+      h('p', { class: 'sub' }, 'Every save, edit and delete is kept, with who did it. You can put a session back the way it was before any change.'));
+    if (state.changesError) card.append(h('p', { class: 'form-error' }, state.changesError));
+    if (!state.changes) return card;
+    if (!state.changes.length) {
+      card.append(h('p', { class: 'empty' }, 'No changes recorded yet.'));
+      return card;
+    }
+    const verbs = { create: 'created', add: 'added to', edit: 'edited', delete: 'deleted', 'delete game': 'deleted a game from', 'remove person': 'removed someone from', restore: 'restored', 'add player': 'added player', 'edit player': 'edited player' };
+    card.append(h('ul', { class: 'changes-list' }, state.changes.map((c) => {
+      const snap = c.after || c.before;
+      const what = snap && snap.played_on ? sessionLabel(snap.played_on, snap.slot) : snap && snap.name ? snap.name : '';
+      const diff = c.session_id ? diffSessions(c.before, c.after) : null;
+      const bits = [];
+      if (diff) {
+        if (diff.moved) bits.push(`moved to ${sessionLabel(c.after.played_on, c.after.slot)}`);
+        if (diff.added.length) bits.push(`+${diff.added.length} game${diff.added.length === 1 ? '' : 's'}`);
+        if (diff.removed.length) bits.push(`−${diff.removed.length} game${diff.removed.length === 1 ? '' : 's'}`);
+        if (diff.peopleAdded.length) bits.push(`+${diff.peopleAdded.map(nameOf).join(', ')}`);
+        if (diff.peopleRemoved.length) bits.push(`−${diff.peopleRemoved.map(nameOf).join(', ')}`);
+      }
+      const when = new Date(c.at).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+      const canRestore = c.session_id && c.action !== 'restore';
+      return h('li', { class: diff && diff.removed.length ? 'has-removed' : null },
+        h('div', null,
+          h('div', null, h('strong', null, c.actor || 'Someone'), ` ${verbs[c.action] || c.action} `, h('strong', null, what)),
+          h('div', { class: 'muted small' }, when, bits.length ? ` · ${bits.join(' · ')}` : '')),
+        canRestore ? h('button', {
+          class: 'btn btn-small btn-ghost',
+          onclick: async () => {
+            const was = c.before ? sessionLabel(c.before.played_on, c.before.slot) : null;
+            if (!confirm(was ? `Put ${was} back exactly as it was before this change? Anything changed in that session since then is replaced (and kept in this history).` : 'This change created the session. Remove it again?')) return;
+            if (await act(() => api.restoreChange(state.code, c.id, actorName()), 'Restored')) loadChanges(true);
+          },
+        }, c.before ? 'Restore before this' : 'Remove again') : null);
+    })));
+    return card;
+  }
+
+  async function loadChanges(force) {
+    if (state.changes && !force) return;
+    try {
+      state.changes = await api.listChanges(state.code, 30);
+      state.changesError = null;
+    } catch (e) {
+      state.changesError = e.message;
+    }
+    render();
+  }
+
+  function unlockCard() {
+    const input = h('input', { type: 'password', autocomplete: 'off', placeholder: 'Group code', 'aria-label': 'Group code', value: '' });
+    const err = h('p', { class: 'form-error', hidden: true });
+    const btn = h('button', { class: 'btn btn-primary', type: 'submit' }, 'Unlock');
+    const form = h('form', {
+      class: 'unlock',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        btn.disabled = true;
+        err.hidden = true;
+        try {
+          if (await unlock(input.value.trim())) { render(); return; }
+          err.textContent = 'That code is not right.';
+        } catch (ex) {
+          err.textContent = ex.message;
+        }
+        err.hidden = false;
+        btn.disabled = false;
+      },
+    }, input, btn);
+    return h('section', { class: 'card' },
+      h('h2', null, 'Enter the group code'),
+      h('p', { class: 'sub' }, 'Anyone can look; you need the code to log sessions and to add or edit players. This browser remembers it.'),
+      err, form);
+  }
+
+  // "Sam wins 72% of games like this" for the log form, from the prediction model.
+  function winChanceNote(a, b, ha, hb, lead = '') {
+    const model = getModel();
+    if (!model.games || !model.idx.has(a) || !model.idx.has(b)) return null;
+    const q = predict(model, a, b, ha, hb).mid.game;
+    const fav = q >= 0.5 ? a : b;
+    return h('span', { class: 'muted' }, `· ${lead}${nameOf(fav)} wins ${pct(Math.max(q, 1 - q))} of games like this`);
+  }
+
+  // Suggested head start for a game between a and b, from the current ratings.
+  // The head start that makes a game closest to 50/50, according to the
+  // prediction model: for the weaker player, try starting at 0–0, 1–0, … 9–0
+  // and pick the start where their chance of winning the game is nearest 50%.
+  function suggestHandicap(a, b) {
+    const d = state.d;
+    const model = getModel();
+    if (!model.games || !model.idx.has(a) || !model.idx.has(b)) return null;
+    const aLevel = predict(model, a, b).mid.game;
+    const who = aLevel < 0.5 ? a : b;
+    const chances = [];
+    for (let pts = 0; pts <= MAX_HANDICAP; pts++) {
+      chances.push(who === a ? predict(model, a, b, pts, 0).mid.game : 1 - predict(model, a, b, 0, pts).mid.game);
+    }
+    let pts = 0;
+    chances.forEach((c, i) => { if (Math.abs(c - 0.5) < Math.abs(chances[pts] - 0.5) - 1e-9) pts = i; });
+    const games = Math.min(d.stats.get(a)?.games || 0, d.stats.get(b)?.games || 0);
+    return { pts, who, chances, settling: games < PROVISIONAL_GAMES };
   }
 
   function validateDraft(dr) {
@@ -2647,7 +3106,7 @@
       const activeBox = h('input', { type: 'checkbox', checked: p.active !== false });
       const btn = h('button', {
         type: 'button', class: 'btn btn-small', disabled: true,
-        onclick: () => act(() => api.savePlayer(state.code, { id: p.id, name: name.value, subscription_start: since.value || null, active: activeBox.checked }), 'Player saved'),
+        onclick: () => act(() => api.savePlayer(state.code, { id: p.id, name: name.value, subscription_start: since.value || null, active: activeBox.checked }, actorName()), 'Player saved'),
       }, 'Save');
       const dirty = () => { btn.disabled = name.value.trim() === p.name && since.value === (subStart(p) || '') && activeBox.checked === (p.active !== false); };
       name.addEventListener('input', dirty);
@@ -2668,7 +3127,7 @@
       onsubmit: (e) => {
         e.preventDefault();
         if (!newName.value.trim()) return;
-        act(() => api.savePlayer(state.code, { name: newName.value, subscription_start: newSince.value || null }), 'Player added');
+        act(() => api.savePlayer(state.code, { name: newName.value, subscription_start: newSince.value || null }, actorName()), 'Player added');
       },
     }, newName, h('label', { class: 'check' }, 'Subscriber since', newSince), h('button', { class: 'btn', type: 'submit' }, 'Add player'));
 
@@ -2689,6 +3148,10 @@
   if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
   window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
   window.addEventListener('scroll', hideTooltip, { passive: true });
+  // Coming back to a tab that was in the background: re-check for a stale form.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && route().view === 'log' && state.draft && state.draft.mode !== 'new' && Date.now() - (state.draftOpenedAt || 0) > STALE_FORM_MS) render();
+  });
 
   render();
   reload();
