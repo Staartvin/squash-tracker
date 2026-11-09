@@ -518,7 +518,7 @@
 
     const stats = new Map(players.map((p) => [p.id, {
       rating: RATING_START, ratingPm: null, games: 0, wins: 0, pf: 0, pa: 0, lastDelta: null,
-      history: [], perSession: [], opp: new Map(), recent: [],
+      history: [], perSession: [], opp: new Map(), recent: [], fairStarts: new Map(),
     }]));
 
     // Ratings come from the prediction model, refitted after every session on
@@ -566,6 +566,11 @@
           P.history.push({ x: sess.played_on, y: after, session: sess.id });
           const t = tally.get(pid);
           P.perSession.push({ x: sess.played_on, y: t.pf / t.games, games: t.games, wins: t.wins, pf: t.pf, pa: t.pa });
+          // The fair head start against everyone played so far, after this session.
+          for (const oid of P.opp.keys()) {
+            if (!P.fairStarts.has(oid)) P.fairStarts.set(oid, []);
+            P.fairStarts.get(oid).push({ x: sess.played_on, y: fairStart(fit, pid, oid) });
+          }
         }
         prevFit = fit;
       }
@@ -1491,6 +1496,9 @@
       oppTile('Nemesis', nemesis),
       favourite && favourite[0] !== nemesis?.[0] ? oppTile('Favourite opponent', favourite) : null));
 
+    const closer = gettingCloserCard(pid);
+    if (closer) frag.append(closer);
+
     frag.append(h('div', { class: 'grid-2' },
       h('section', { class: 'card' },
         h('h2', null, 'Points per game'),
@@ -1540,6 +1548,78 @@
     return frag;
   }
 
+  // Progress against the players you still need a head start against. Wins can
+  // take a long time to come, so this shows the smaller steps: the head start
+  // you'd need going down, more points per game, closer games.
+  function closerRows(d, pid) {
+    const st = d.stats.get(pid);
+    return [...st.fairStarts.entries()]
+      .map(([oid, pts]) => {
+        const now = pts[pts.length - 1];
+        const peak = pts.reduce((a, b) => (b.y > a.y ? b : a));
+        const games = st.recent.filter((g) => g.oppId === oid);
+        const best = games.reduce((a, g) => (!a || g.pf > a.pf ? g : a), null);
+        const losses = games.filter((g) => !g.won);
+        const closest = losses.reduce((a, g) => (!a || g.so - g.sf < a.so - a.sf ? g : a), null);
+        const last5 = games.slice(-5);
+        const before = games.slice(-10, -5);
+        const avgPf = (xs) => xs.reduce((s, g) => s + g.pf, 0) / xs.length;
+        return { oid, pts, now, peak, best, closest, last: avgPf(last5), before: before.length >= 3 ? avgPf(before) : null };
+      })
+      .filter((r) => r.now.y >= 0.05)
+      .sort((a, b) => b.now.y - a.now.y);
+  }
+
+  function gettingCloserCard(pid) {
+    const d = state.d;
+    const rows = closerRows(d, pid);
+    if (!rows.length) return null;
+    const p = d.pById.get(pid);
+    const dateShort = (iso) => fmtDate(iso, { year: undefined });
+    return h('section', { class: 'card' },
+      h('h2', null, 'Getting closer'),
+      h('p', { class: 'sub' },
+        `Against the players ${p.name} still needs a head start against. "Head start needed" is the start that would make a game 50/50, from the ratings after each session; it going down means catching up, long before the wins come. `,
+        h('a', { href: '#predict/headstart' }, 'How is it worked out?')),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'data' },
+        h('thead', null, h('tr', null,
+          h('th', null, 'Opponent'),
+          h('th', { class: 'num' }, 'Head start needed'),
+          h('th', { class: 'num', title: 'Average points won per game, head start not counted' }, 'Points, last 5'),
+          h('th', { class: 'num', title: 'Most points won in one game, head start not counted' }, 'Most points'),
+          h('th', { class: 'num' }, 'Closest game'))),
+        h('tbody', null, rows.map((r) => {
+          const down = r.peak.y - r.now.y;
+          const up = r.before == null ? null : r.last - r.before;
+          return h('tr', null,
+            h('td', null, h('span', { class: 'player-cell' }, dotFor(r.oid), nameOf(r.oid))),
+            h('td', { class: 'num', title: `Highest: ${fmt1(r.peak.y)} after ${fmtDate(r.peak.x)}` },
+              h('strong', null, fmt1(r.now.y)),
+              down >= 0.1 ? h('span', { class: 'delta-up small' }, ` ▼ ${fmt1(down)} from ${fmt1(r.peak.y)}`) : null),
+            h('td', { class: 'num' }, fmt1(r.last),
+              up != null && Math.abs(up) >= 0.1 ? h('span', { class: (up > 0 ? 'delta-up' : 'delta-down') + ' small' }, ` ${up > 0 ? '▲' : '▼'} ${fmt1(Math.abs(up))}`) : null),
+            h('td', { class: 'num' }, r.best ? `${r.best.pf} · ${dateShort(r.best.date)}` : '–'),
+            h('td', { class: 'num' }, r.closest
+              ? `${r.closest.sf}–${r.closest.so}${r.closest.hf ? ` from ${r.closest.hf}–0` : ''} · ${dateShort(r.closest.date)}`
+              : 'Won them all'));
+        })))),
+      rows.some((r) => r.pts.length >= 2) ? h('div', null,
+        h('h3', null, 'Head start needed, after each session'),
+        lineChart({
+          label: `${p.name}: head start needed against each opponent after each session`,
+          series: rows.map((r) => ({ id: r.oid, name: nameOf(r.oid), color: d.pById.get(r.oid).color, points: r.pts })),
+          curve: 'linear', dots: true, height: 200,
+          // Zoomed in on the data (at least 2 points tall), so small steps show.
+          ...(() => {
+            const ys = rows.flatMap((r) => r.pts.map((pt) => pt.y));
+            const mid = (Math.min(...ys) + Math.max(...ys)) / 2;
+            const half = Math.max(1, (Math.max(...ys) - Math.min(...ys)) / 2);
+            return { yMin: Math.max(0, mid - half), yMax: Math.min(10, mid + half) };
+          })(),
+          yFmt: (v) => (Number.isInteger(v) ? String(v) : v.toFixed(1)),
+        })) : null);
+  }
+
   // Milestones a player has reached (with the date) and the next few to aim for.
   function milestones(d, pid) {
     const st = d.stats.get(pid);
@@ -1582,6 +1662,43 @@
     for (const [icon, label, fn] of special) {
       const g = firstWhere(fn);
       if (g) add(icon, label, g.date);
+    }
+
+    // Catching up: steps that count long before the first win.
+    const behind = closerRows(d, pid);
+    const close = firstWhere((g) => !g.won && g.so - g.sf <= 3);
+    if (close) add('😤', 'Close one: lost by 3 or less', close.date);
+    else if (st.games) {
+      const c = st.recent.filter((g) => !g.won).reduce((a, g) => (!a || g.so - g.sf < a.so - a.sf ? g : a), null);
+      next.push({ icon: '😤', label: 'Lose a game by 3 or less', note: c ? `Closest so far: ${c.sf}–${c.so}` : null });
+    }
+    const hsWin = firstWhere((g) => g.won && g.hf > 0);
+    if (hsWin) add('🪜', 'First win with a head start', hsWin.date);
+    else if (behind.length) next.push({ icon: '🪜', label: 'Win a game with a head start' });
+    for (const [oid, o] of st.opp) {
+      const took = st.recent.find((g) => g.oppId === oid && !g.won && g.pf >= 5);
+      if (took) add('💥', `Took 5 points off ${nameOf(oid)} in a game`, took.date);
+      else if (o.wins < o.games && behind.some((r) => r.oid === oid)) {
+        const best = Math.max(...st.recent.filter((g) => g.oppId === oid).map((g) => g.pf));
+        next.push({ icon: '💥', label: `Take 5 points off ${nameOf(oid)} in a game`, have: best, need: 5 });
+      }
+    }
+    // The head start needed against someone, down from its highest.
+    const downTargets = [1, 2, 3];
+    for (const [oid, pts] of st.fairStarts) {
+      let peak = -Infinity;
+      let di = 0;
+      for (const pt of pts) {
+        peak = Math.max(peak, pt.y);
+        while (di < downTargets.length && peak - pt.y >= downTargets[di]) {
+          add('📉', `Head start needed vs ${nameOf(oid)} down by ${downTargets[di]}`, pt.x);
+          di++;
+        }
+      }
+      const row = behind.find((r) => r.oid === oid);
+      if (row && di < downTargets.length) {
+        next.push({ icon: '📉', label: `Need ${downTargets[di]} less head start vs ${nameOf(oid)}`, have: Math.max(0, Math.round((row.peak.y - row.now.y) * 10) / 10), need: downTargets[di] });
+      }
     }
 
     // Week streaks reached.
@@ -1862,14 +1979,14 @@
   // (win by two), starting from ha–hb.
   function gameWinProb(p, ha = 0, hb = 0, to = 11) {
     const deuce = (p * p) / (p * p + (1 - p) * (1 - p));
-    const memo = new Map();
+    const memo = new Float64Array((to + 1) * (to + 1)).fill(-1);
     const f = (a, b) => {
       if (a >= to && a - b >= 2) return 1;
       if (b >= to && b - a >= 2) return 0;
       if (a >= to - 1 && b >= to - 1) return a === b ? deuce : a > b ? p + (1 - p) * deuce : p * deuce;
-      const key = a * 100 + b;
-      if (!memo.has(key)) memo.set(key, p * f(a + 1, b) + (1 - p) * f(a, b + 1));
-      return memo.get(key);
+      const key = a * (to + 1) + b;
+      if (memo[key] < 0) memo[key] = p * f(a + 1, b) + (1 - p) * f(a, b + 1);
+      return memo[key];
     };
     return f(ha, hb);
   }
@@ -1910,6 +2027,35 @@
     const hi = at(mu + Z90 * sd);
     const pair = model.pairGames.get([a, b].sort().join('|')) || 0;
     return { mid, lo, hi, pair };
+  }
+
+  // The head start a needs against b for a 50/50 game, as a fraction (e.g. 8.6):
+  // the point between two whole starts where a's chance crosses 50%, using the
+  // same averaged chance as predict(). Negative when a is the stronger one:
+  // then it's the start a would give. Unlike the suggested head start it isn't
+  // rounded or capped, so it shows small steps of progress.
+  function fairStart(model, a, b) {
+    if (!model || !model.idx.has(a) || !model.idx.has(b)) return null;
+    const i = model.idx.get(a);
+    const j = model.idx.get(b);
+    const mu = model.theta[i] - model.theta[j];
+    if (mu > 0) return -fairStart(model, b, a);
+    const sd = Math.sqrt(Math.max(1e-12, model.cov[i][i] + model.cov[j][j] - 2 * model.cov[i][j]));
+    const chances = new Array(11).fill(0);
+    let wsum = 0;
+    for (let k = -20; k <= 20; k++) {
+      const z = k * 0.2;
+      const w = Math.exp(-z * z / 2);
+      const p = sigmoid(mu + z * sd);
+      for (let s = 0; s <= 10; s++) chances[s] += w * gameWinProb(p, s, 0);
+      wsum += w;
+    }
+    for (let s = 0; s <= 10; s++) chances[s] /= wsum;
+    if (chances[0] >= 0.5) return 0;
+    for (let s = 1; s <= 10; s++) {
+      if (chances[s] >= 0.5) return s - 1 + (0.5 - chances[s - 1]) / (chances[s] - chances[s - 1]);
+    }
+    return 10;
   }
 
   // Typical score of a game: the winner reaches 11, the loser's points follow from the rally odds.

@@ -8,6 +8,7 @@ A single static page that tracks:
 - **Leaderboard:** a rating for every player (with a ± margin), plus wins, win %, points per game and week streaks.
 - **Records & bragging rights:** longest week streak, regular of the month, hot hand, biggest upset, fiercest rivalry, marathon game and more.
 - **Progress:** each player's points per game and rating over time, a GitHub-style activity calendar, milestones with what's next, and their record against each opponent.
+- **Getting closer:** for anyone still behind someone, the head start they'd need against them after each session, plus points per game, best score and closest game per opponent. Milestones for catching up (a close game, 5 points off someone, the needed head start going down) count long before the first win.
 - **Head-to-head heatmap:** who usually beats whom, at a glance.
 - **Predictions:** the chance to win a rally, a game and a best-of-5 match for any two players, with a 90% interval, plus a backtest of how good the predictions have been.
 - **Suggested head starts:** for uneven matches, e.g. "Vincent starts at 4–0", based on the ratings.
@@ -106,6 +107,8 @@ For people without a subscription, the dashboard shows what their visits over th
 **Records.** The upset is the win the model rated least likely beforehand (under 40%), using only the games before that session. Nemesis and favourite opponent on a player's page need at least 3 games against that person.
 
 **Head starts.** The suggested head start is the one that makes a game closest to 50/50. The prediction model estimates the weaker player's chance of winning a rally, works out exactly how likely they are to win the game when starting at 0–0, 1–0, … 9–0, and picks the start nearest 50%. The Predict tab shows this table for any matchup. With few games the estimate is rough; it settles as you play. Games played with a head start count fairly: the head-start points are left out of the rallies won.
+
+**Getting closer.** "Head start needed" is the same calculation without rounding or the cap of 9: the exact point between two starts where the game becomes 50/50 (e.g. 8.6), from the ratings after each session. It moves in small steps, so it shows catching up well before the first win. Early on it tends to rise as the model learns how big the gap is, which is why the card and the milestones compare with its highest value.
 
 ## Safety nets
 
