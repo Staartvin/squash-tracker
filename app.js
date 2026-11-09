@@ -165,7 +165,7 @@
     const from = weeks.has(thisWeek) ? thisWeek : weeks.has(thisWeek - 1) ? thisWeek - 1 : null;
     let current = 0;
     if (from != null) for (let w = from; weeks.has(w); w--) current++;
-    return { current, best, onTheLine: current > 0 && !weeks.has(thisWeek) };
+    return { current, best, onTheLine: current > 0 && !weeks.has(thisWeek), startWeek: current ? from - current + 1 : null };
   }
 
   function winStreak(recent) {
@@ -617,6 +617,12 @@
     for (const p of players) {
       const st = stats.get(p.id);
       st.weekStreak = weekStreak(weeksBy.get(p.id), thisWeek);
+      // The first visit of the current streak, e.g. "since 9 Oct".
+      st.weekStreak.since = null;
+      for (const sess of sessions) {
+        if (weekOf(sess.played_on) !== st.weekStreak.startWeek || !attBySession.get(sess.id)?.has(p.id)) continue;
+        if (!st.weekStreak.since || sess.played_on < st.weekStreak.since) st.weekStreak.since = sess.played_on;
+      }
       st.winStreak = winStreak(st.recent);
     }
 
@@ -1235,7 +1241,7 @@
           h('td', { class: 'num' }, `${st.wins}–${st.games - st.wins}`),
           h('td', { class: 'num' }, fmtPct(st.wins / st.games)),
           h('td', { class: 'num' }, fmt1(st.pf / st.games)),
-          h('td', { class: 'num', title: `${st.weekStreak.current} week${st.weekStreak.current === 1 ? '' : 's'} in a row, best ${st.weekStreak.best}` },
+          h('td', { class: 'num', title: `${st.weekStreak.current} week${st.weekStreak.current === 1 ? '' : 's'} in a row${st.weekStreak.since ? ` since ${fmtDate(st.weekStreak.since, { year: undefined })}` : ''}, best ${st.weekStreak.best}` },
             st.weekStreak.current >= 2 ? `🔥 ${st.weekStreak.current}` : st.weekStreak.current || '–'));
       })))));
     if (streakNote) card.append(streakNote);
@@ -1452,7 +1458,7 @@
     const visitTiles = [
       tile('Visits', visitWindow.visits, `${visitWindow.label} · worth ${fmtEuro(visitWindow.total)}`),
       tile('Week streak', ws.current >= 2 ? `🔥 ${ws.current}` : ws.current,
-        `${ws.onTheLine ? 'On the line: play before Sunday' : ws.current ? 'Played this week' : 'Play this week to start one'} · best ${ws.best}`),
+        `${ws.since ? `Since ${fmtDate(ws.since, { year: undefined })} · ` : ''}${ws.onTheLine ? 'On the line: play before Sunday' : ws.current ? 'Played this week' : 'Play this week to start one'} · best ${ws.best}`),
     ];
 
     if (!st.games) {
