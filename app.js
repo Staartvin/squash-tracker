@@ -526,6 +526,7 @@
     // before its session, so it is what the site would have predicted then.
     const base = { players, sessions, gamesBySession };
     const predictions = [];
+    const gameEffects = new Map();
     let prevFit = null;
     let upset = null;
     let marathon = null;
@@ -554,16 +555,30 @@
         }
         if (!marathon || g.score_a + g.score_b > marathon.g.score_a + marathon.g.score_b) marathon = { g, date: sess.played_on };
         const chance = informed ? expected : null;
-        record(A, g.player_a, g.player_b, { won: aWon, pf: g.score_a - ha, pa: g.score_b - hb, sf: g.score_a, so: g.score_b, hf: ha, ho: hb, chance, ownRating: rA0, oppRating: rB0 });
-        record(B, g.player_b, g.player_a, { won: !aWon, pf: g.score_b - hb, pa: g.score_a - ha, sf: g.score_b, so: g.score_a, hf: hb, ho: ha, chance: chance == null ? null : 1 - chance, ownRating: rB0, oppRating: rA0 });
+        record(A, g.player_a, g.player_b, { gameId: g.id, won: aWon, pf: g.score_a - ha, pa: g.score_b - hb, sf: g.score_a, so: g.score_b, hf: ha, ho: hb, chance, ownRating: rA0, oppRating: rB0 });
+        record(B, g.player_b, g.player_a, { gameId: g.id, won: !aWon, pf: g.score_b - hb, pa: g.score_a - ha, sf: g.score_b, so: g.score_a, hf: hb, ho: ha, chance: chance == null ? null : 1 - chance, ownRating: rB0, oppRating: rA0 });
       }
       if (sessGames.length) {
-        const fit = fitRallyModel(base, fromTime(toTime(sess.played_on) + DAY), sess.played_on);
+        // Refit after every game, so each game's effect on the ratings is known.
+        // The fit before the first game already differs a little from the last
+        // session's: time has passed, so older games count a little less.
+        let fit = fitRallyModel(base, null, sess.played_on, { sessionId: sess.id, count: 0 });
+        sessGames.forEach((g, k) => {
+          const next = fitRallyModel(base, null, sess.played_on, { sessionId: sess.id, count: k + 1 });
+          gameEffects.set(g.id, {
+            delta: new Map(players.map((p) => [p.id, ratingOf(next, p.id) - ratingOf(fit, p.id)])),
+            rally: sigmoid((ratingOf(fit, g.player_a) - ratingOf(fit, g.player_b)) / RATING_SCALE),
+          });
+          fit = next;
+        });
         for (const pid of tally.keys()) {
           const P = stats.get(pid);
           const after = ratingOf(fit, pid);
           P.lastDelta = after - ratingOf(prevFit, pid);
-          P.history.push({ x: sess.played_on, y: after, session: sess.id });
+          // How much of the session's change came from this player's own games.
+          const own = sessGames.filter((g) => g.player_a === pid || g.player_b === pid)
+            .reduce((sum, g) => sum + gameEffects.get(g.id).delta.get(pid), 0);
+          P.history.push({ x: sess.played_on, y: after, session: sess.id, delta: P.lastDelta, own });
           const t = tally.get(pid);
           P.perSession.push({ x: sess.played_on, y: t.pf / t.games, games: t.games, wins: t.wins, pf: t.pf, pa: t.pa });
           // The fair head start against everyone played so far, after this session.
@@ -631,7 +646,7 @@
       st.winStreak = winStreak(st.recent);
     }
 
-    return { players, pById, sessions, games, gamesBySession, attBySession, stats, ranked, rankOf, upset, marathon, weeksBy, model, predictions };
+    return { players, pById, sessions, games, gamesBySession, attBySession, stats, ranked, rankOf, upset, marathon, weeksBy, model, predictions, gameEffects };
   }
 
   function visitValue(d, playerId, from, to) {
@@ -1544,7 +1559,8 @@
         h('span', { class: 'muted small', style: 'min-width:92px' }, fmtDay(g.date)),
         h('span', { class: 'score' }, `${g.sf}–${g.so}`),
         h('span', { class: 'muted' }, g.won ? 'beat' : 'lost to'),
-        h('span', { class: 'side' }, dotFor(g.oppId), h('span', null, nameOf(g.oppId))))))));
+        h('span', { class: 'side' }, dotFor(g.oppId), h('span', null, nameOf(g.oppId))),
+        ratingDeltaTag({ id: g.gameId }, pid))))));
     return frag;
   }
 
@@ -1911,7 +1927,9 @@
   }
 
   // Fits strengths on games before `until` (all games if null), weighting by age relative to `ref`.
-  function fitRallyModel(d, until = null, ref = todayIso()) {
+  // `partial` ({ sessionId, count }) stops after the first `count` games of
+  // that session, to see what each game changed.
+  function fitRallyModel(d, until = null, ref = todayIso(), partial = null) {
     const ids = d.players.map((p) => p.id);
     const idx = new Map(ids.map((id, i) => [id, i]));
     const n = ids.length;
@@ -1921,7 +1939,9 @@
       if (until && sess.played_on >= until) break;
       const age = Math.max(0, (toTime(ref) - toTime(sess.played_on)) / DAY);
       const w = RALLY_WEIGHT * Math.pow(0.5, age / HALF_LIFE_DAYS);
-      for (const g of d.gamesBySession.get(sess.id) || []) {
+      let sessGames = d.gamesBySession.get(sess.id) || [];
+      if (partial && sess.id === partial.sessionId) sessGames = sessGames.slice(0, partial.count);
+      for (const g of sessGames) {
         const wa = g.score_a - (g.start_a || 0);
         const wb = g.score_b - (g.start_b || 0);
         if (wa + wb <= 0 || !idx.has(g.player_a) || !idx.has(g.player_b)) continue;
@@ -1929,6 +1949,7 @@
         const key = [g.player_a, g.player_b].sort().join('|');
         pairGames.set(key, (pairGames.get(key) || 0) + 1);
       }
+      if (partial && sess.id === partial.sessionId) break;
     }
     const precision = 1 / (PRIOR_SD * PRIOR_SD);
     let theta = new Array(n).fill(0);
@@ -2503,6 +2524,31 @@
     return `${g.score_a}–${g.score_b}`;
   }
 
+  // What a game did to someone's rating, e.g. "+3" or "−2".
+  function ratingDeltaTag(g, pid) {
+    const eff = state.d.gameEffects.get(g.id);
+    if (!eff) return null;
+    const x = eff.delta.get(pid);
+    const r = Math.round(x);
+    return h('span', { class: 'rating-delta ' + (r > 0 ? 'delta-up' : r < 0 ? 'delta-down' : 'muted'), title: `Rating ${fmtSigned(x)} from this game` }, fmtSigned(x));
+  }
+
+  // The score the ratings expected before a game, in the same a–b order as
+  // the real score. With rally chance p, the favourite needs (11 − start)
+  // rallies, and the other side wins (1 − p)/p as many in the meantime.
+  function expectedScore(g) {
+    const eff = state.d.gameEffects.get(g.id);
+    if (!eff) return null;
+    const ha = g.start_a || 0;
+    const hb = g.start_b || 0;
+    const aFav = gameWinProb(eff.rally, ha, hb) >= 0.5;
+    const p = aFav ? eff.rally : 1 - eff.rally;
+    const loser = (aFav ? hb : ha) + (11 - (aFav ? ha : hb)) * (1 - p) / p;
+    if (loser >= 9.5) return { text: 'close', aFav };
+    const l = Math.round(loser);
+    return { text: aFav ? `11–${l}` : `${l}–11`, aFav };
+  }
+
   // "(+4)" after the name of a player who started with a head start.
   function startTag(n) {
     return n ? h('span', { class: 'start-tag', title: `Started at ${n}–0` }, `+${n}`) : null;
@@ -2607,12 +2653,40 @@
       h('div', { class: 'people' }, att.map((pid) => h('span', { class: 'person' }, dotFor(pid), nameOf(pid)))),
       games.length ? h('ul', { class: 'game-list' }, games.map((g) => {
         const aWin = g.score_a > g.score_b;
+        const exp = expectedScore(g);
         return h('li', null,
-          h('span', { class: 'side' + (aWin ? ' win' : ''), style: 'justify-content:flex-end' }, startTag(g.start_a), h('span', null, nameOf(g.player_a)), dotFor(g.player_a)),
-          h('span', { class: 'score' }, gameScore(g)),
-          h('span', { class: 'side right' + (aWin ? '' : ' win') }, dotFor(g.player_b), h('span', null, nameOf(g.player_b)), startTag(g.start_b)));
+          h('span', { class: 'side' + (aWin ? ' win' : ''), style: 'justify-content:flex-end' }, ratingDeltaTag(g, g.player_a), startTag(g.start_a), h('span', null, nameOf(g.player_a)), dotFor(g.player_a)),
+          h('span', { class: 'score' }, gameScore(g),
+            exp ? h('span', { class: 'expected', title: 'The score the ratings expected before this game' }, `exp. ${exp.text}`) : null),
+          h('span', { class: 'side right' + (aWin ? '' : ' win') }, dotFor(g.player_b), h('span', null, nameOf(g.player_b)), startTag(g.start_b), ratingDeltaTag(g, g.player_b)));
       })) : h('p', { class: 'muted small', style: 'margin:0' }, 'No scores logged.'),
+      games.length ? sessionRatings(sess) : null,
       h('div', { class: 'share-row' }, shareButtons(() => sessionSummary(sess))));
+  }
+
+  // Each player's rating after the session, the change, and how much of the
+  // change came from their own games.
+  function sessionRatings(sess) {
+    const d = state.d;
+    const rows = d.players
+      .map((p) => ({ p, pt: d.stats.get(p.id).history.find((x) => x.session === sess.id) }))
+      .filter((r) => r.pt)
+      .sort((a, b) => b.pt.delta - a.pt.delta);
+    if (!rows.length) return null;
+    return h('div', { class: 'session-ratings' },
+      h('div', { class: 'session-ratings-list' }, h('span', { class: 'muted small' }, 'Rating:'), rows.map(({ p, pt }) => {
+        const rest = pt.delta - pt.own;
+        return h('span', { class: 'person', title: Math.abs(rest) >= 0.5 ? `${fmtSigned(pt.own)} from ${p.name}'s own games, ${fmtSigned(rest)} from the rest (other games, time passing)` : null },
+          dotFor(p.id), `${p.name} ${Math.round(pt.y)} `,
+          h('span', { class: Math.round(pt.delta) > 0 ? 'delta-up' : Math.round(pt.delta) < 0 ? 'delta-down' : 'muted' }, fmtSigned(pt.delta)),
+          Math.abs(rest) >= 0.5 ? h('span', { class: 'muted small' }, ` (games ${fmtSigned(pt.own)}, rest ${fmtSigned(rest)})`) : null);
+      })),
+      h('details', { class: 'explain' },
+        h('summary', null, 'Why can a win lower your rating?'),
+        h('p', null, 'The rating counts rallies, not wins. Before each game the ratings expect a score (the small "exp." under it). Win more rallies than that and your rating goes up; win fewer and it goes down, even in a game you won. So beating a much weaker player 11–9 when 11–3 was expected costs a little, and losing 6–11 when 2–11 was expected gains a little.'),
+        h('p', null, 'Head-start points don\'t count as rallies won: starting at 8–0 and winning 11–9 means 3 rallies won and 9 lost.'),
+        h('p', null, 'The two players in a game don\'t always move by the same amount: the rating of someone with fewer or older games is less certain, so it moves more.'),
+        h('p', null, 'The numbers next to the names are what each game changed. The session total can differ a little from their sum ("rest"): games between the others that session move everyone a bit, because ratings compare everyone with everyone, and older games count a little less as time passes.')));
   }
 
   // ----- Sharing a session
@@ -2633,9 +2707,11 @@
       for (const g of games) {
         const aWon = g.score_a > g.score_b;
         const side = (pid, start) => nameOf(pid) + (start ? ` (+${start})` : '');
+        const eff = d.gameEffects.get(g.id);
+        const change = (w, l) => (eff ? ` (${fmtSigned(eff.delta.get(w))}/${fmtSigned(eff.delta.get(l))})` : '');
         lines.push(aWon
-          ? `${side(g.player_a, g.start_a)} ${g.score_a}–${g.score_b} ${side(g.player_b, g.start_b)}`
-          : `${side(g.player_b, g.start_b)} ${g.score_b}–${g.score_a} ${side(g.player_a, g.start_a)}`);
+          ? `${side(g.player_a, g.start_a)} ${g.score_a}–${g.score_b} ${side(g.player_b, g.start_b)}${change(g.player_a, g.player_b)}`
+          : `${side(g.player_b, g.start_b)} ${g.score_b}–${g.score_a} ${side(g.player_a, g.start_a)}${change(g.player_b, g.player_a)}`);
       }
       const record = new Map();
       for (const g of games) {
