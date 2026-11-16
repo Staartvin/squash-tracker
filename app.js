@@ -563,6 +563,7 @@
         // The fit before the first game already differs a little from the last
         // session's: time has passed, so older games count a little less.
         let fit = fitRallyModel(base, null, sess.played_on, { sessionId: sess.id, count: 0 });
+        const startFit = fit;
         sessGames.forEach((g, k) => {
           const next = fitRallyModel(base, null, sess.played_on, { sessionId: sess.id, count: k + 1 });
           gameEffects.set(g.id, {
@@ -578,7 +579,9 @@
           // How much of the session's change came from this player's own games.
           const own = sessGames.filter((g) => g.player_a === pid || g.player_b === pid)
             .reduce((sum, g) => sum + gameEffects.get(g.id).delta.get(pid), 0);
-          P.history.push({ x: sess.played_on, y: after, session: sess.id, delta: P.lastDelta, own });
+          // The rest: games between the others, and time passing since the last session.
+          const time = ratingOf(startFit, pid) - ratingOf(prevFit, pid);
+          P.history.push({ x: sess.played_on, y: after, session: sess.id, delta: P.lastDelta, own, time, others: P.lastDelta - own - time });
           const t = tally.get(pid);
           P.perSession.push({ x: sess.played_on, y: t.pf / t.games, games: t.games, wins: t.wins, pf: t.pf, pa: t.pa });
           // The fair head start against everyone played so far, after this session.
@@ -2665,29 +2668,62 @@
       h('div', { class: 'share-row' }, shareButtons(() => sessionSummary(sess))));
   }
 
-  // Each player's rating after the session, the change, and how much of the
-  // change came from their own games.
+  // Each player's rating after the session and where the change came from:
+  // their own games, games between the others, and time passing.
   function sessionRatings(sess) {
     const d = state.d;
+    const games = d.gamesBySession.get(sess.id) || [];
     const rows = d.players
       .map((p) => ({ p, pt: d.stats.get(p.id).history.find((x) => x.session === sess.id) }))
       .filter((r) => r.pt)
       .sort((a, b) => b.pt.delta - a.pt.delta);
     if (!rows.length) return null;
+    const big = (x) => Math.abs(x) >= 0.5;
+    const tag = (x) => h('span', { class: Math.round(x) > 0 ? 'delta-up' : Math.round(x) < 0 ? 'delta-down' : 'muted' }, fmtSigned(x));
+    const parts = (p, pt) => [
+      ['own games', pt.own],
+      [`games without ${p.name}`, pt.others],
+      ['time passing', pt.time],
+    ].filter(([, x], i) => i === 0 || big(x));
+
+    // Per player: the full split, and the games without them that moved them most.
+    const breakdown = rows.map(({ p, pt }) => {
+      const moved = games
+        .filter((g) => g.player_a !== p.id && g.player_b !== p.id)
+        .map((g) => ({ g, x: d.gameEffects.get(g.id)?.delta.get(p.id) || 0 }))
+        .filter((m) => big(m.x))
+        .sort((a, b) => Math.abs(b.x) - Math.abs(a.x))
+        .slice(0, 3);
+      return h('div', { class: 'rating-split' },
+        h('div', null, dotFor(p.id), h('strong', null, ` ${p.name} `), tag(pt.delta), ' = ',
+          parts(p, pt).flatMap(([label, x], i) => [i ? ' · ' : '', `${label} `, tag(x)])),
+        moved.length ? h('ul', { class: 'rating-split-games' }, moved.map(({ g, x }) => {
+          const eff = d.gameEffects.get(g.id);
+          const [w, l] = g.score_a > g.score_b ? [g.player_a, g.player_b] : [g.player_b, g.player_a];
+          const [ws, ls] = g.score_a > g.score_b ? [g.score_a, g.score_b] : [g.score_b, g.score_a];
+          return h('li', null, `${nameOf(w)} ${ws}–${ls} ${nameOf(l)} (${nameOf(w)} `, tag(eff.delta.get(w)), `, ${nameOf(l)} `, tag(eff.delta.get(l)), `) → ${p.name} `, tag(x));
+        })) : null);
+    });
+
     return h('div', { class: 'session-ratings' },
       h('div', { class: 'session-ratings-list' }, h('span', { class: 'muted small' }, 'Rating:'), rows.map(({ p, pt }) => {
-        const rest = pt.delta - pt.own;
-        return h('span', { class: 'person', title: Math.abs(rest) >= 0.5 ? `${fmtSigned(pt.own)} from ${p.name}'s own games, ${fmtSigned(rest)} from the rest (other games, time passing)` : null },
-          dotFor(p.id), `${p.name} ${Math.round(pt.y)} `,
-          h('span', { class: Math.round(pt.delta) > 0 ? 'delta-up' : Math.round(pt.delta) < 0 ? 'delta-down' : 'muted' }, fmtSigned(pt.delta)),
-          Math.abs(rest) >= 0.5 ? h('span', { class: 'muted small' }, ` (games ${fmtSigned(pt.own)}, rest ${fmtSigned(rest)})`) : null);
+        const extra = parts(p, pt).length > 1;
+        return h('span', { class: 'person' },
+          dotFor(p.id), `${p.name} ${Math.round(pt.y)} `, tag(pt.delta),
+          extra ? h('span', { class: 'muted small' }, ` (own ${fmtSigned(pt.own)}, without ${p.name} ${fmtSigned(pt.others)}${big(pt.time) ? `, time ${fmtSigned(pt.time)}` : ''})`) : null);
       })),
       h('details', { class: 'explain' },
-        h('summary', null, 'Why can a win lower your rating?'),
+        h('summary', null, 'Where do these changes come from?'),
+        breakdown,
+        h('h4', null, 'Games without you'),
+        h('p', null, 'Your rating is measured against the people you\'ve played. When one of them does better than expected in a game without you, your past results against them are worth more, so you go up a little; when they do worse, you go down a little. Like a league table: losing to a team that turns out to be top of the league looks better in hindsight.'),
+        h('p', null, 'So if you\'ve mostly played Niels, a session where Niels beats everyone also lifts you a bit, even if you lost your own games.'),
+        h('h4', null, 'Time passing'),
+        h('p', null, 'Games count a little less as they get older (half as much after 180 days), so between sessions everyone drifts slightly towards the middle.'),
+        h('h4', null, 'Why can a win lower your rating?'),
         h('p', null, 'The rating counts rallies, not wins. Before each game the ratings expect a score (the small "exp." under it). Win more rallies than that and your rating goes up; win fewer and it goes down, even in a game you won. So beating a much weaker player 11–9 when 11–3 was expected costs a little, and losing 6–11 when 2–11 was expected gains a little.'),
         h('p', null, 'Head-start points don\'t count as rallies won: starting at 8–0 and winning 11–9 means 3 rallies won and 9 lost.'),
-        h('p', null, 'The two players in a game don\'t always move by the same amount: the rating of someone with fewer or older games is less certain, so it moves more.'),
-        h('p', null, 'The numbers next to the names are what each game changed. The session total can differ a little from their sum ("rest"): games between the others that session move everyone a bit, because ratings compare everyone with everyone, and older games count a little less as time passes.')));
+        h('p', null, 'The two players in a game don\'t always move by the same amount: the rating of someone with fewer or older games is less certain, so it moves more.')));
   }
 
   // ----- Sharing a session

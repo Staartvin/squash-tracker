@@ -683,3 +683,6 @@ table.hc-table tr.chosen td { background: color-mix(in srgb, var(--accent) 28%, 
 .preview-line:empty { display: none; }
 .preview-line strong { color: var(--ink); font-weight: 600; }
 .ratings-preview li { display: flex; align-items: center; gap: 4px; }
+.rating-split { margin: 8px 0; font-size: 13px; }
+.rating-split-games { margin: 4px 0 0; padding-left: 22px; font-size: 12px; color: var(--ink-2); }
+.session-ratings .explain h4 { margin: 12px 0 4px; font-size: 13px; }
