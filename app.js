@@ -2538,11 +2538,12 @@
   // rallies, and the other side wins (1 − p)/p as many in the meantime.
   function expectedScore(g) {
     const eff = state.d.gameEffects.get(g.id);
-    if (!eff) return null;
-    const ha = g.start_a || 0;
-    const hb = g.start_b || 0;
-    const aFav = gameWinProb(eff.rally, ha, hb) >= 0.5;
-    const p = aFav ? eff.rally : 1 - eff.rally;
+    return eff ? expectedFrom(eff.rally, g.start_a || 0, g.start_b || 0) : null;
+  }
+
+  function expectedFrom(rally, ha, hb) {
+    const aFav = gameWinProb(rally, ha, hb) >= 0.5;
+    const p = aFav ? rally : 1 - rally;
     const loser = (aFav ? hb : ha) + (11 - (aFav ? ha : hb)) * (1 - p) / p;
     if (loser >= 9.5) return { text: 'close', aFav };
     const l = Math.round(loser);
@@ -2914,6 +2915,71 @@
   }
 
   // Step 2: who was there and the games.
+  // ----- Rating preview while logging
+  //
+  // The data as it would be with the form saved: the form's games added to
+  // the session (or replacing them, when editing). Only complete games count.
+  function draftBase(dr) {
+    const d = state.d;
+    const target = dr.targetId ? d.sessions.find((x) => x.id === dr.targetId) : null;
+    const clash = dr.mode === 'new' ? d.sessions.find((x) => x.played_on === dr.date && x.slot === dr.slot) : null;
+    const into = target || clash;
+    const sess = into
+      ? Object.assign({}, into, dr.mode === 'edit' ? { played_on: dr.date, slot: dr.slot } : {})
+      : { id: 'draft', played_on: dr.date, slot: dr.slot };
+    const kept = into && dr.mode !== 'edit' ? d.gamesBySession.get(into.id) || [] : [];
+    const complete = (g) => g.a && g.b && g.a !== g.b && Number.isInteger(g.sa) && Number.isInteger(g.sb)
+      && g.sa !== g.sb && g.sa >= (g.ha || 0) && g.sb >= (g.hb || 0);
+    const games = [];
+    // For each form row: how many session games come before it, and whether it counts itself.
+    const rows = dr.games.map((g, i) => {
+      const row = { before: kept.length + games.length, done: complete(g) };
+      if (row.done) games.push({ id: `draft-${i}`, player_a: g.a, player_b: g.b, score_a: g.sa, score_b: g.sb, start_a: g.ha || 0, start_b: g.hb || 0 });
+      return row;
+    });
+    const sessions = d.sessions.filter((x) => x.id !== sess.id).concat(sess)
+      .sort((a, b) => a.played_on.localeCompare(b.played_on) || SLOTS[a.slot].order - SLOTS[b.slot].order);
+    const gamesBySession = new Map(d.gamesBySession);
+    gamesBySession.set(sess.id, [...kept, ...games]);
+    return { base: { players: d.players, sessions, gamesBySession }, sess, rows, games };
+  }
+
+  // Per form row: the score the ratings expect, and once the scores are in,
+  // what the game would do to both ratings. Same refit-after-every-game as History.
+  function draftGamePreviews(dr) {
+    const { base, sess, rows } = draftBase(dr);
+    const fits = new Map();
+    const fitAt = (count) => {
+      if (!fits.has(count)) fits.set(count, fitRallyModel(base, null, sess.played_on, { sessionId: sess.id, count }));
+      return fits.get(count);
+    };
+    return dr.games.map((g, i) => {
+      if (!g.a || !g.b || g.a === g.b) return null;
+      const before = fitAt(rows[i].before);
+      const rally = sigmoid((ratingOf(before, g.a) - ratingOf(before, g.b)) / RATING_SCALE);
+      const out = { expected: expectedFrom(rally, g.ha || 0, g.hb || 0) };
+      if (rows[i].done) {
+        const after = fitAt(rows[i].before + 1);
+        out.da = ratingOf(after, g.a) - ratingOf(before, g.a);
+        out.db = ratingOf(after, g.b) - ratingOf(before, g.b);
+      }
+      return out;
+    });
+  }
+
+  const signedTag = (x) => {
+    const r = Math.round(x);
+    return h('span', { class: r > 0 ? 'delta-up' : r < 0 ? 'delta-down' : 'muted' }, fmtSigned(x));
+  };
+
+  function previewLine(g, pv) {
+    if (!pv) return [];
+    return [
+      h('span', null, 'Expected: ', h('strong', null, pv.expected.text === 'close' ? 'a close game' : pv.expected.text)),
+      pv.da == null ? null : h('span', null, '· If saved now: ', nameOf(g.a), ' ', signedTag(pv.da), ', ', nameOf(g.b), ' ', signedTag(pv.db)),
+    ].filter(Boolean);
+  }
+
   function sessionForm() {
     const d = state.d;
     const dr = state.draft;
@@ -2983,11 +3049,21 @@
         h('a', { href: '#predict/headstart', class: 'small' }, 'How?'));
     };
 
+    // Live rating preview per game, updated in place while typing so the
+    // inputs keep their focus.
+    const previews = dr.games.map(() => h('div', { class: 'preview-line', 'aria-live': 'polite' }));
+    const refreshPreviews = () => {
+      const pvs = draftGamePreviews(dr);
+      previews.forEach((el, i) => el.replaceChildren(...previewLine(dr.games[i], pvs[i])));
+    };
+    let previewTimer = null;
+    const schedulePreview = () => { clearTimeout(previewTimer); previewTimer = setTimeout(refreshPreviews, 200); };
+
     const rows = h('div', { class: 'game-rows' }, dr.games.map((g, i) => {
       const scoreInput = (key, cls, labelText) => h('input', {
         type: 'number', inputmode: 'numeric', min: 0, max: 99, class: cls, 'aria-label': labelText, placeholder: '0',
         value: g[key] ?? '',
-        oninput: (e) => { g[key] = e.target.value === '' ? null : Number(e.target.value); saveDraft(); },
+        oninput: (e) => { g[key] = e.target.value === '' ? null : Number(e.target.value); saveDraft(); schedulePreview(); },
       });
       return h('div', { class: 'game-row' },
         playerSelect(g.a, (e) => update(() => { g.a = e.target.value || null; g.ha = 0; g.hb = 0; }), 'pa', `Game ${i + 1}, first player`),
@@ -2996,8 +3072,10 @@
         scoreInput('sb', 'sb', `Game ${i + 1}, second player's score`),
         playerSelect(g.b, (e) => update(() => { g.b = e.target.value || null; g.ha = 0; g.hb = 0; }), 'pb', `Game ${i + 1}, second player`),
         h('button', { type: 'button', class: 'btn-icon del', 'aria-label': `Remove game ${i + 1}`, onclick: () => update(() => { dr.games.splice(i, 1); }) }, '×'),
-        handicapLine(g, i));
+        handicapLine(g, i),
+        previews[i]);
     }));
+    refreshPreviews();
 
     const addGame = () => update(() => {
       const prev = dr.games[dr.games.length - 1];
@@ -3120,6 +3198,7 @@
       confirmText = diff.removed.length ? `Yes, remove ${diff.removed.length} game${diff.removed.length === 1 ? '' : 's'} and save` : 'Save changes';
     }
     if (nothing) body.push(h('p', { class: 'muted' }, 'There\'s nothing to save yet.'));
+    if (!nothing) body.push(ratingsIfSaved(dr, target));
 
     const saveBtn = h('button', { type: 'button', class: 'btn btn-primary' + (warn ? ' btn-warn' : ''), disabled: nothing }, confirmText);
     saveBtn.addEventListener('click', async () => {
@@ -3153,6 +3232,26 @@
       h('div', { class: 'actions', style: 'margin-top:14px' },
         saveBtn,
         h('button', { type: 'button', class: 'btn', onclick: () => { state.logStep = 'form'; render(); } }, 'Back to the form')));
+  }
+
+  // Leaderboard ratings now and with this saved, for everyone whose rating moves.
+  function ratingsIfSaved(dr, target) {
+    const d = state.d;
+    const { base, games } = draftBase(dr);
+    const removed = dr.mode === 'edit' && target ? d.gamesBySession.get(target.id) || [] : [];
+    if (!games.length && !removed.length) return null;
+    const now = getModel();
+    const after = fitRallyModel(base);
+    const involved = new Set([...games, ...removed].flatMap((g) => [g.player_a, g.player_b]));
+    const rows = d.players
+      .map((p) => ({ p, from: ratingOf(now, p.id), to: ratingOf(after, p.id) }))
+      .filter((r) => involved.has(r.p.id) || Math.abs(r.to - r.from) >= 0.5)
+      .sort((a, b) => (b.to - b.from) - (a.to - a.from));
+    return h('div', { class: 'field' },
+      h('strong', null, 'Ratings if saved:'),
+      h('ul', { class: 'review-list ratings-preview' }, rows.map((r) => h('li', null,
+        dotFor(r.p.id), ` ${r.p.name} ${Math.round(r.from)} → ${Math.round(r.to)} `, signedTag(r.to - r.from)))),
+      h('p', { class: 'muted small', style: 'margin:4px 0 0' }, 'Players who didn\'t play can move a little too: ratings compare everyone with everyone.'));
   }
 
   // Step 4: saved. Share, undo, or carry on.

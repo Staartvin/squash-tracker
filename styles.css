@@ -413,7 +413,7 @@ textarea { min-height: 64px; resize: vertical; }
 @media (max-width: 560px) {
   .game-row {
     grid-template-columns: minmax(0, 1fr) 64px 36px;
-    grid-template-areas: "pa sa del" "pb sb del" "hc hc hc";
+    grid-template-areas: "pa sa del" "pb sb del" "hc hc hc" "pv pv pv";
     padding: 10px;
     border: 1px solid var(--border);
     border-radius: 10px;
@@ -425,6 +425,7 @@ textarea { min-height: 64px; resize: vertical; }
   .game-row .vs { display: none; }
   .game-row .del { grid-area: del; align-self: center; }
   .game-row .hc-line { grid-area: hc; }
+  .game-row .preview-line { grid-area: pv; }
 }
 
 .btn {
@@ -676,3 +677,9 @@ table.hc-table tr.chosen td { background: color-mix(in srgb, var(--accent) 28%, 
 .session-ratings { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
 .session-ratings-list { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; font-size: 13px; }
 .session-ratings .explain { margin-top: 6px; }
+
+/* Rating preview while logging */
+.preview-line { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 13px; color: var(--ink-2); }
+.preview-line:empty { display: none; }
+.preview-line strong { color: var(--ink); font-weight: 600; }
+.ratings-preview li { display: flex; align-items: center; gap: 4px; }
